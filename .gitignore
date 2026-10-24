@@ -1,0 +1,7 @@
+/target
+/dist
+# Game saves, cheat tables and third-party tools used for research; never commit them.
+/research
+ML0*
+EDIT0*
+.DS_Store
