@@ -12,8 +12,8 @@ Desktop editor (Rust + egui) for ongoing **Football Life 2026** and
 - **Edit finances**: transfer budget, annual salary budget, manager name.
 - **Update check** against GitHub Releases.
 
-One executable, no Python or installer. Windows, macOS and Linux builds are on
-the [Releases](../../releases) page.
+One executable, no Python or installer. Windows and Linux builds are on the
+[Releases](../../releases) page; on macOS build from source (`cargo build --release`).
 
 ## Usage
 
@@ -102,8 +102,8 @@ outside the recorded edits.
 
 ## Releases & updates
 
-Every push to `main` runs the tests and builds Windows/macOS/Linux
-(`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
+Every push to `main` runs the tests and builds Linux and Windows (cross-compiled)
+on a single Ubuntu runner (`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
 release yet, the workflow publishes it with the downloads. The app checks the
 latest release of the `repository` in `Cargo.toml` on start; **Cek update**
 checks manually.
