@@ -1,9 +1,9 @@
 name: Build & Release
 
-# One Ubuntu runner (cheapest minutes): tests, a native Linux build and a
-# cross-compiled Windows build. When the version in Cargo.toml has no matching
-# vX.Y.Z release yet, the binaries are published as that release; the in-app
-# update checker reads the latest release, so bumping the version is all it takes.
+# One Ubuntu runner (cheapest minutes): tests, then the Windows .exe
+# cross-compiled with mingw. When the version in Cargo.toml has no matching
+# vX.Y.Z release yet, the .exe is published as that release; the in-app update
+# checker reads the latest release, so bumping the version is all it takes.
 
 on:
   push:
@@ -58,29 +58,15 @@ jobs:
       - name: Test
         run: cargo test --locked --release
 
-      - name: Build Linux
-        run: cargo build --locked --release
-
       - name: Build Windows
         run: cargo build --locked --release --target x86_64-pc-windows-gnu
 
       - name: Package
         run: |
-          version="${{ steps.meta.outputs.version }}"
           mkdir -p dist
-          stage() {  # stage <platform> <binary>; prints the staged folder name
-            name="$APP-v$version-$1"
-            mkdir -p "dist/$name"
-            cp "$2" README.md THIRD_PARTY_NOTICES.md "dist/$name/"
-            cp -r LICENSES "dist/$name/"
-            echo "$name"
-          }
-          win=$(stage windows-x64 "target/x86_64-pc-windows-gnu/release/$APP.exe")
-          linux=$(stage linux-x64 "target/release/$APP")
+          cp "target/x86_64-pc-windows-gnu/release/$APP.exe" "dist/$APP-v${{ steps.meta.outputs.version }}-windows-x64.exe"
+          cp THIRD_PARTY_NOTICES.md LICENSES/*.txt dist/
           cd dist
-          zip -qr "$win.zip" "$win"
-          tar czf "$linux.tar.gz" "$linux"
-          rm -rf "$win" "$linux"
           sha256sum * > SHA256SUMS.txt
           ls -l
 

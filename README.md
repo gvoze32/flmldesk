@@ -12,14 +12,15 @@ Desktop editor (Rust + egui) for ongoing **Football Life 2026** and
 - **Edit finances**: transfer budget, annual salary budget, manager name.
 - **Update check** against GitHub Releases.
 
-One executable, no Python or installer. Windows and Linux builds are on the
-[Releases](../../releases) page; on macOS build from source (`cargo build --release`).
+One Windows executable, no Python or installer: download `FLMLDesk-vX.Y.Z-windows-x64.exe`
+from the [Releases](../../releases) page. Other systems can build from source
+(`cargo build --release`).
 
 ## Usage
 
 1. In the game, save the Master League and **quit to the main menu or close the
    game**.
-2. Run `FLMLDesk.exe`.
+2. Run `FLMLDesk-vX.Y.Z-windows-x64.exe`.
 3. **Buka save ML…** (open), or drag the save file onto the window. Saves live in
    `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`.
    - The club you manage and the in-game date are read from the save.
@@ -102,8 +103,8 @@ outside the recorded edits.
 
 ## Releases & updates
 
-Every push to `main` runs the tests and builds Linux and Windows (cross-compiled)
-on a single Ubuntu runner (`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
+Every push to `main` runs the tests and cross-compiles the Windows `.exe` on a
+single Ubuntu runner (`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
 release yet, the workflow publishes it with the downloads. The app checks the
 latest release of the `repository` in `Cargo.toml` on start; **Cek update**
 checks manually.
