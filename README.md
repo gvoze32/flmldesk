@@ -1,118 +1,121 @@
 # FL ML Desk
 
-Aplikasi desktop (Rust + egui) untuk mengedit save Master League (`ML000000xx`)
-**Football Life 2026** dan **PES 2021** yang sedang berjalan:
+Desktop editor (Rust + egui) for ongoing **Football Life 2026** and
+**PES 2021** Master League saves (`ML000000xx`):
 
-- **Rekrut pemain ke klubmu** dengan fee, gaji per tahun dan tanggal akhir
-  kontrak pilihanmu. Fee dipotong dari transfer budget, dan kontrak langsung
-  berstatus resmi.
-- **Jual pemain dari klubmu**: kontraknya dihapus dan fee masuk ke transfer budget.
-- **Transfer antar klub AI** (hanya mengubah skuad).
-- **Edit budget**: transfer budget, salary budget tahunan, nama manajer.
-- **Cek update otomatis** dari GitHub Releases.
+- **Sign players for your club** with the fee, annual salary and contract end
+  you choose. The fee comes out of the transfer budget and the contract is
+  registered straight away.
+- **Sell players from your club**: their contract is removed and the fee is
+  added to the transfer budget.
+- **Move players between AI clubs** (squads only).
+- **Edit finances**: transfer budget, annual salary budget, manager name.
+- **Update check** against GitHub Releases.
 
-Satu file program, tanpa instalasi Python. Ada versi Windows, macOS dan Linux di
-[Releases](../../releases).
+One executable, no Python or installer. Windows, macOS and Linux builds are on
+the [Releases](../../releases) page.
 
-## Cara pakai
+## Usage
 
-1. Di game, simpan Master League lalu **keluar ke menu utama atau tutup game**.
-2. Jalankan `FLMLDesk.exe`.
-3. **Buka save ML…**, atau seret file save ke jendela aplikasi. Lokasi save:
+1. In the game, save the Master League and **quit to the main menu or close the
+   game**.
+2. Run `FLMLDesk.exe`.
+3. **Buka save ML…** (open), or drag the save file onto the window. Saves live in
    `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`.
-   - Klub yang kamu latih dan tanggal game dibaca otomatis dari save.
-   - Kalau ada `EDIT00000000` di folder yang sama, nama pemainnya ikut dimuat.
-4. **Folder game (nama/OVR)…** (cukup sekali): pilih folder instalasi game, yang
-   berisi folder `download`. Nama, posisi, umur dan OVR semua pemain dibaca dari
-   `Player.bin` di file `.cpk`.
-5. Tab **Transfer pemain**: cari pemain, isi **Fee transfer**, **Gaji per tahun**
-   dan **Kontrak s.d.**, lalu tekan **Transfer →**.
-   - Angka bisa ditulis `12.500.000`, `12,5jt`, `750rb`, `3m` atau `500k`.
-   - Kalau pemain yang dipilih ada di klubmu, mode berubah menjadi **jual**.
-6. Tab **Budget & manajer**: ubah angka lalu tekan **Terapkan**.
-7. **Simpan ke save (backup otomatis)**. File lama disalin dulu ke
-   `FLMLDesk_backup\` di samping save. Setelah itu load save di game.
+   - The club you manage and the in-game date are read from the save.
+   - An `EDIT00000000` in the same folder is used for player names.
+4. **Folder game (nama/OVR)…** (once): pick the game installation folder (the one
+   containing `download`). Names, positions, ages and OVR of every player come
+   from `Player.bin` in the `.cpk` archives.
+5. **Transfer pemain** tab: search a player, fill in **Fee transfer**,
+   **Gaji per tahun** (salary per year) and **Kontrak s.d.** (contract end), then
+   press **Transfer →**.
+   - Amounts accept `12.500.000`, `12,5jt`, `750rb`, `3m` or `500k`.
+   - Selecting one of your own players switches to **sell** mode.
+6. **Budget & manajer** tab: change the values and press **Terapkan** (apply).
+7. **Simpan ke save (backup otomatis)** (save with backup). The current file is
+   first copied to `FLMLDesk_backup\` next to the save. Then load the save in
+   the game.
 
-Semua perubahan bisa dibatalkan satu per satu sebelum disimpan. **Mata uang**
-hanya mengubah tampilan dan input, memakai kurs yang sama dengan game
-(misalnya ¥ = €×125). Save selalu menyimpan dalam satuan €100.
+Every change can be undone one by one before saving. **Mata uang** (currency)
+only affects display and input and uses the game's own rates (e.g. ¥ = € × 125).
+The save always stores amounts in units of €100.
 
-## Apa yang diubah di save
+## What gets written
 
-Semua offset di bawah relatif ke blok `data` setelah didekripsi. Status
-"terbukti" artinya sudah dicocokkan dengan save FL26 asli: save sebelum deal,
-setelah deal disepakati, dan setelah pemain datang, ditambah angka yang tampil
-di game.
+Offsets are relative to the decrypted `data` block. "Confirmed" means matched
+against real FL26 saves (before a deal, deal agreed, player arrived) and the
+values shown in game.
 
-| Data | Lokasi | Status |
+| Data | Location | Status |
 |---|---|---|
-| Skuad klub (40 slot) | `0x50 + klub·0x690`, roster `+0x14C`, jumlah `+0x426` | Terbukti |
-| Transfer budget | FL26 `0xC7DD00` · PES21 `0xC7DE00`, u32 × €100 | FL26 terbukti (¥307.001.287.500 = 24.560.103 × 12.500); PES21 dari Money Tool |
-| Salary budget tahunan | budget `+0x14`, u32 × €100 | Terbukti. Game menampilkan nilai ini dikurangi total gaji |
-| Nama manajer | `0x1942C0`, 46 byte UTF-8 | Terbukti |
-| Tabel kontrak klubmu | baris 48 byte, dicari lewat skuad | Terbukti, lihat di bawah |
+| Club squad (40 slots) | `0x50 + club·0x690`, roster `+0x14C`, count `+0x426` | Confirmed |
+| Transfer budget | FL26 `0xC7DD00`, PES21 `0xC7DE00`, u32 × €100 | FL26 confirmed (¥307,001,287,500 = 24,560,103 × 12,500); PES21 from ML Money Tool |
+| Annual salary budget | budget `+0x14`, u32 × €100 | Confirmed; the game shows it minus the wage bill |
+| Manager name | `0x1942C0`, 46 bytes UTF-8 | Confirmed |
+| Your club's contract table | 48-byte rows, located through the squad | Confirmed, see below |
 
-Isi satu baris kontrak (12 × u32):
+Contract row (12 × u32):
 
-| Word | Isi |
+| Word | Content |
 |---|---|
 | w0, w1 | internal id, player id |
-| w2 | gaji per tahun (× €100) |
-| w3 | nilai pemain saat direkrut (× €100) |
-| w4 | akhir kontrak (`thn \| bln<<16 \| tgl<<24`) |
-| w5 | indeks baris (16 bit bawah) |
-| w6 | referensi klub (14 bit bawah = indeks klub) |
-| w7 | status: 5 = resmi, 4 = deal disepakati, 1/3 = negosiasi |
-| w8 | tanggal mulai kontrak |
+| w2 | annual salary (× €100) |
+| w3 | player value at signing (× €100) |
+| w4 | contract end (`year \| month<<16 \| day<<24`) |
+| w5 | row index (low 16 bits) |
+| w6 | club reference (low 14 bits = club index) |
+| w7 | status: 5 = under contract, 4 = deal agreed, 1/3 = negotiation |
+| w8 | contract start date |
 
-Yang dilakukan game saat merekrut, dan ditiru editor:
+What the game does on a signing, and the editor reproduces:
 
-- Fee dipotong dari transfer budget **saat deal disepakati**. Di save contoh,
-  transfer budget turun persis sebesar jumlah 3 fee.
-- Salary budget tersimpan **tidak** diubah. Gaji baru otomatis mengurangi sisa
-  yang tampil di game.
-- Baris kontrak berstatus 5 dengan klub = klubmu, tanggal mulai = tanggal game.
-  Pemain yang sudah ada di daftar negosiasi barisnya dilengkapi di tempat;
-  pemain lain mendapat baris baru di akhir tabel.
+- The fee is charged to the transfer budget **when the deal is agreed**. In the
+  sample saves the budget dropped by exactly the sum of three fees.
+- The stored salary budget is **not** changed. The new wage lowers the remaining
+  amount the game displays.
+- The contract row gets status 5, your club, and the in-game date as start
+  date. A player already in your negotiation list has his row completed in
+  place; anyone else gets a new row at the end of the table.
 
-Saat menyimpan, hash SHA-512 save dihitung ulang dan file hasil didekripsi
-ulang untuk verifikasi sebelum ditulis. Penyimpanan dibatalkan kalau ada byte
-berubah di luar perubahan yang tercatat.
+On save the SHA-512 digests are recomputed and the output is decrypted again
+for verification before it is written. Saving is refused if any byte changed
+outside the recorded edits.
 
-## Batasan
+## Limitations
 
-- Yang belum diketahui: indeks baris (w5) yang dipilih game untuk pemain baru,
-  dan nilai pemain (w3). Editor memakai indeks berikutnya dan mengisi w3 dengan
-  fee. Saat diuji dengan mengulang transfer Max Dowman di save `before`, hanya
-  dua kolom itu yang berbeda dari yang ditulis game.
-- **Penjualan pemain** menghapus baris kontrak dan menggeser baris berikutnya ke
-  atas. Belum ada save contoh penjualan; cek di game.
-- **Pinjaman tidak didukung.** Semua transfer bersifat permanen.
-- **Free agent**: pemain "Lainnya (timnas, tanpa klub)" bisa berstatus *Others*
-  atau *free agent*. Transfer free agent lewat editor diketahui bisa
-  menghasilkan "pemain hantu".
-- Riwayat fee di laporan keuangan game tidak ditambah.
-- Klub AI tidak punya kontrak yang diubah; transfer AI ↔ AI hanya memindah skuad.
-- Maksimal 40 pemain per klub. Nomor punggung dan lineup diatur di game.
-- Offset budget PES 2021 vanilla belum diuji dengan save asli. Kalau strukturnya
-  tidak cocok, edit budget otomatis dikunci.
+- Still unknown: the row index (w5) the game picks for a new signing, and the
+  player value (w3). The editor uses the next index and stores the fee as w3.
+  Replaying the Max Dowman signing on the `before` save matched the game's own
+  row except for these two fields.
+- **Selling** removes the contract row and moves later rows up. No sample save
+  of a sale exists yet; check in game.
+- **Loans are not supported.** All transfers are permanent.
+- **Free agents**: players under "Lainnya (timnas, tanpa klub)" (national team,
+  no club) can be *Others* or *free agents* in game. Moving free agents with an
+  editor is known to create "ghost players".
+- The fee history in the game's finance report is not extended.
+- AI clubs have no contracts edited; AI ↔ AI moves only change squads.
+- At most 40 players per club. Shirt numbers and line-ups are set in game.
+- The vanilla PES 2021 budget offset has not been tested on a real save. If the
+  structure does not match, budget editing is locked.
 
-## Rilis & update
+## Releases & updates
 
-Setiap push ke `main` menjalankan tes dan build Windows/macOS/Linux
-(`.github/workflows/release.yml`). Kalau `version` di `Cargo.toml` belum punya
-rilis `vX.Y.Z`, workflow langsung membuat rilis itu beserta file unduhannya.
-Aplikasi mengecek rilis terbaru di repository `repository` pada `Cargo.toml`
-saat dibuka; tombol **Cek update** mengecek manual.
+Every push to `main` runs the tests and builds Windows/macOS/Linux
+(`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
+release yet, the workflow publishes it with the downloads. The app checks the
+latest release of the `repository` in `Cargo.toml` on start; **Cek update**
+checks manually.
 
-Merilis versi baru = naikkan `version` di `Cargo.toml`, lalu push.
+To release: bump `version` in `Cargo.toml` and push.
 
-## Pengembangan
+## Development
 
 ```bash
-cargo run --release          # jalankan aplikasi
-cargo run --release -- path/ke/ML00000000   # langsung buka save
-cargo test --release         # tes (save ML sintetis, tanpa file game)
+cargo run --release                          # run the app
+cargo run --release -- path/to/ML00000000    # open a save directly
+cargo test --release                         # tests (synthetic ML saves, no game files)
 ```
 
-Kredit dan lisensi pihak ketiga: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Credits and third-party licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
