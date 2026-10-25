@@ -40,8 +40,10 @@ Go to the [Releases](../../releases) page and download
    - If you pick one of your own players, the app switches to selling.
    - A player you are already negotiating for in the game is refused: finish
      or cancel that negotiation in the game first.
-   - Players without a club, and saves the app can't read the transfer lists
-     of, join your squad right away instead.
+   - A player without a club (free agent) also arrives the next day; in the
+     game he only negotiates his salary, so leave the fee at 0.
+   - Saves the app can't read the transfer lists of: the player joins your
+     squad right away instead.
 6. **Budget & manager** tab: change the values and press **Apply**.
 7. Click **Save (with automatic backup)**. A copy of your old save is kept in
    the `FLMLDesk_backup` folder next to it, just in case.

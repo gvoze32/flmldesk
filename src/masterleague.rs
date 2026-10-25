@@ -666,39 +666,39 @@ impl MasterLeague {
                 let value = u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0);
                 let salary = fmt_eur(units as i64 * SALARY_UNIT as i64);
                 let table = g.contracts.clone().unwrap();
-                // From a club: an agreed deal, and the game moves the player on the
-                // next day. Saves whose transfer lists aren't recognised, and
-                // players without a club (no sample of their deal yet), join right away.
-                let tables = match req.source {
-                    Source::Club(seller) => Some((seller, DealTables::locate(&g.data, &table))),
-                    Source::Others => None,
-                };
-                if let Some((seller, Ok(tables))) = &tables {
-                    let arrival = g.game_date.unwrap().next_day();
-                    let deal = AgreedDeal {
-                        player,
-                        buyer_ref: table.team_ref,
-                        seller_ref: u32_at(&g.data, Self::base(*seller)),
-                        fee_units: value,
-                        salary_units: units,
-                        value_units: value,
-                        end,
-                        arrival,
-                    };
-                    for (offset, bytes) in tables.agree(&g.data, &table, &deal)? {
-                        g.patch(offset, &bytes);
+                // An agreed deal: the game moves the player on the next day.
+                // Saves whose transfer lists aren't recognised join right away.
+                match DealTables::locate(&g.data, &table) {
+                    Ok(tables) => {
+                        let arrival = g.game_date.unwrap().next_day();
+                        let deal = AgreedDeal {
+                            player,
+                            buyer_ref: table.team_ref,
+                            seller_ref: match req.source {
+                                Source::Club(seller) => Some(u32_at(&g.data, Self::base(seller))),
+                                Source::Others => None,
+                            },
+                            fee_units: value,
+                            salary_units: units,
+                            value_units: value,
+                            end,
+                            arrival,
+                        };
+                        for (offset, bytes) in tables.agree(&g.data, &table, &deal)? {
+                            g.patch(offset, &bytes);
+                        }
+                        if !table.find(&g.data, &player).iter().any(|c| c.status == STATUS_AGREED && c.team == table.team_ref) {
+                            return Err(Error::new("Final check failed: the agreed deal can't be read."));
+                        }
+                        parts.push(format!("deal agreed, arrives {arrival}; salary {salary}/yr until {end}"));
+                        return Ok(parts.join("; "));
                     }
-                    if !table.find(&g.data, &player).iter().any(|c| c.status == STATUS_AGREED && c.team == table.team_ref) {
-                        return Err(Error::new("Final check failed: the agreed deal can't be read."));
+                    Err(_) => {
+                        let (offset, record) = table.signing(&g.data, &player, units, value, end, g.game_date.unwrap())?;
+                        g.patch(offset, &record);
+                        parts.push(format!("salary {salary}/yr until {end}"));
+                        parts.push("joined right away (this save's transfer lists weren't recognised)".into());
                     }
-                    parts.push(format!("deal agreed, arrives {arrival}; salary {salary}/yr until {end}"));
-                    return Ok(parts.join("; "));
-                }
-                let (offset, record) = table.signing(&g.data, &player, units, value, end, g.game_date.unwrap())?;
-                g.patch(offset, &record);
-                parts.push(format!("salary {salary}/yr until {end}"));
-                if matches!(tables, Some((_, Err(_)))) {
-                    parts.push("joined right away (this save's transfer lists weren't recognised)".into());
                 }
             }
             if let Source::Club(i) = req.source {

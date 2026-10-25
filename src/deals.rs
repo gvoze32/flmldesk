@@ -2,23 +2,25 @@
 //! Football Life 2026 stores a deal agreed in the game. On the arrival date the
 //! game itself moves the player, completes the contract and clears the lists.
 //!
-//! Decoded from two negotiations saved at every step. Offsets marked
-//! "table +" are relative to contract slot 0 (`ContractTable::first`), which
-//! the game always precedes with a row whose w8 is `0x74574`:
+//! Decoded from negotiations saved at every step (two club signings, one free
+//! agent). Offsets marked "table +" are relative to contract slot 0
+//! (`ContractTable::first`), which the game always precedes with a row whose
+//! w8 is `0x74574`:
 //!
 //! | Data | Location | Row |
 //! |---|---|---|
 //! | Offers | table + `0xD5C0` (after 1140 contract slots), 60 bytes | id, buying club, state (4 = agreed), arrival date, 3 filler words, selling club, internal id, player id, fee, fee, `0xFFFF`, `0xFFFF`, 0 |
-//! | Agreed deals | table + `0x47720`, 6 bytes | u16 offer id, u16 contract index, `0xFFFF` |
+//! | Agreed deals | table + `0x47720`, 6 bytes | u16 offer id, u16 contract index, `0xFFFF`; a free agent: contract index, `0xFFFF`, `0xFFFF` |
 //! | Pending arrivals | `0xC81870`, 12 bytes | internal id, player id, salary units |
 //! | Season deals | `0xC803E0`, 52 bytes | internal id, player id, six zeros, minus the fee (i32), 1, 0, 0, `0xFFFF` |
 //!
-//! Offer ids and contract indexes share one numbering: a new negotiation takes
-//! the lowest free number as offer id and the next free one as contract index.
-//! The fee is in units of 100 EUR everywhere. The game also writes a news item
-//! and a negotiation timeline; neither is needed for the arrival, so they are
-//! left alone. Every table is checked before writing; anything unexpected
-//! fails closed.
+//! A free agent's deal has no offer and no season-deal row. Offer ids and
+//! contract indexes share one numbering: the lowest free number is the offer
+//! id and the next free one the contract index (a free agent's contract takes
+//! the lowest). The fee is in units of 100 EUR everywhere. The game also
+//! writes a news item and a negotiation timeline; neither is needed for the
+//! arrival, so they are left alone. Every table is checked before writing;
+//! anything unexpected fails closed.
 
 use std::collections::BTreeSet;
 
@@ -91,7 +93,9 @@ enum Entry {
 pub struct AgreedDeal {
     pub player: Player,
     pub buyer_ref: u32,
-    pub seller_ref: u32,
+    /// Club the player leaves; `None` for a player without a club (free agent),
+    /// whose deal has no offer and no fee.
+    pub seller_ref: Option<u32>,
     pub fee_units: u32,
     pub salary_units: u32,
     pub value_units: u32,
@@ -130,8 +134,8 @@ impl DealTables {
             let [id, index, _] = u16s::<3>(data, table.first + AGREED_OFFSET + i * AGREED_ENTRY)?;
             Some(match (id, index) {
                 (NONE16, NONE16) => Entry::Free,
-                (NONE16, _) | (_, NONE16) => Entry::Unknown,
-                (id, index) if id < 2000 && index < 2000 => Entry::Used,
+                // A free agent's deal has no offer: (contract index, 0xFFFF).
+                (id, index) if id < 2000 && (index < 2000 || index == NONE16) => Entry::Used,
                 _ => Entry::Unknown,
             })
         })
@@ -173,44 +177,49 @@ impl DealTables {
                 p.player_id
             )));
         }
-        // Offer ids and contract indexes share one numbering.
+        // Offer ids and contract indexes share one numbering: the lowest free
+        // number for the offer, the next free one for the contract. A free
+        // agent has no offer, so his contract takes the lowest free number.
         let mut used: BTreeSet<u32> = table.rows(data).iter().map(|c| c.index).collect();
         used.extend(offers.iter().map(|w| w[0] & 0xFFFF));
-        let offer_id = (0..).find(|n| !used.contains(n)).unwrap();
-        let index = (offer_id + 1..).find(|n| !used.contains(n)).unwrap();
+        let free_from = |start: u32| (start..).find(|n| !used.contains(n)).unwrap();
+        let offer_id = deal.seller_ref.map(|_| free_from(0));
+        let index = free_from(offer_id.map_or(0, |id| id + 1));
         if index >= 2000 {
             return Err(Error::new("No free contract number is left."));
         }
 
-        let row = table.agreed(data, &p, index, deal.salary_units, deal.value_units, deal.end, deal.arrival)?;
-        let arrival = deal.arrival.pack();
-        let offer = [
-            offer_id,
-            deal.buyer_ref,
-            OFFER_AGREED,
-            arrival,
-            0xFFFF_FFFF,
-            0xFFFF_FFFF,
-            0xFFFF,
-            deal.seller_ref,
-            p.internal_id,
-            p.player_id,
-            deal.fee_units,
-            deal.fee_units,
-            0xFFFF,
-            0xFFFF,
-            0,
-        ];
-        let agreed: Vec<u8> = [offer_id as u16, index as u16, NONE16].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let pending = [p.internal_id, p.player_id, deal.salary_units];
-        let fee = (-(deal.fee_units as i64)) as i32 as u32;
-        let season = [p.internal_id, p.player_id, 0, 0, 0, 0, 0, 0, fee, 1, 0, 0, 0xFFFF];
-        Ok(vec![
-            row,
-            (self.offers + self.offer_count * OFFER_RECORD, encode(offer)),
-            (table.first + AGREED_OFFSET + self.agreed_free * AGREED_ENTRY, agreed),
-            (PENDING_ARRIVALS + self.pending_free * PENDING_ENTRY, encode(pending)),
-            (SEASON_DEALS + self.deal_free * DEAL_ENTRY, encode(season)),
-        ])
+        let mut patches = vec![table.agreed(data, &p, index, deal.salary_units, deal.value_units, deal.end, deal.arrival)?];
+        let pair = match (offer_id, deal.seller_ref) {
+            (Some(offer_id), Some(seller_ref)) => {
+                let offer = [
+                    offer_id,
+                    deal.buyer_ref,
+                    OFFER_AGREED,
+                    deal.arrival.pack(),
+                    0xFFFF_FFFF,
+                    0xFFFF_FFFF,
+                    0xFFFF,
+                    seller_ref,
+                    p.internal_id,
+                    p.player_id,
+                    deal.fee_units,
+                    deal.fee_units,
+                    0xFFFF,
+                    0xFFFF,
+                    0,
+                ];
+                patches.push((self.offers + self.offer_count * OFFER_RECORD, encode(offer)));
+                let fee = (-(deal.fee_units as i64)) as i32 as u32;
+                let season = [p.internal_id, p.player_id, 0, 0, 0, 0, 0, 0, fee, 1, 0, 0, 0xFFFF];
+                patches.push((SEASON_DEALS + self.deal_free * DEAL_ENTRY, encode(season)));
+                [offer_id as u16, index as u16, NONE16]
+            }
+            _ => [index as u16, NONE16, NONE16],
+        };
+        let pair: Vec<u8> = pair.iter().flat_map(|v| v.to_le_bytes()).collect();
+        patches.push((table.first + AGREED_OFFSET + self.agreed_free * AGREED_ENTRY, pair));
+        patches.push((PENDING_ARRIVALS + self.pending_free * PENDING_ENTRY, encode([p.internal_id, p.player_id, deal.salary_units])));
+        Ok(patches)
     }
 }

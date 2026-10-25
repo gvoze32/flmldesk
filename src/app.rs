@@ -538,13 +538,13 @@ impl App {
                 let left = f.salary_eur - wages;
                 lines.push(format!("Salary budget left (in game): {} → {}", self.to_display(left), self.to_display(left - wage)));
             }
-            let from_club = matches!(self.selected, Some((Source::Club(_), _)));
-            if from_club && let Some(day) = game.game_date.map(|d| d.next_day()) {
+            if let Some(day) = game.game_date.map(|d| d.next_day()) {
                 lines.push(format!(
-                    "Deal agreed now: the fee is paid today and the player joins on {day}, when the game moves him. Until then he shows in your negotiations."
+                    "Deal agreed now: the player joins on {day}, when the game moves him. Until then he shows in your negotiations."
                 ));
-            } else {
-                lines.push("The player joins your squad right away. Check it in the game.".into());
+            }
+            if matches!(self.selected, Some((Source::Others, _))) && fee != 0 {
+                lines.push("A player without a club only negotiates his salary in the game; leave the fee at 0.".into());
             }
         } else {
             let contract = self.selected.and_then(|(_, p)| game.contract_of(&p));
@@ -585,19 +585,6 @@ impl App {
         })();
         if parsed.is_err() {
             error_dialog("Invalid details", "Check the fee, salary and contract date.");
-            return;
-        }
-        if source == Source::Others
-            && !confirm(
-                "Player without a club",
-                &format!(
-                    "{} isn't registered at any club (only at a national team).\n\nIn the game this player may be \
-                     listed as \"Others\" or as a FREE AGENT. Moving free agents with an editor is known to cause \
-                     problems (\"ghost players\"). Check in the game first.\n\nContinue?",
-                    info.name
-                ),
-            )
-        {
             return;
         }
         let game = self.game.as_mut().unwrap();

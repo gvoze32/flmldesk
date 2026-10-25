@@ -232,9 +232,10 @@ fn ai_transfer_touches_rosters_only() {
 }
 
 #[test]
-fn other_source_signing_keeps_national_team() {
+fn free_agent_deal_has_no_offer_and_no_fee() {
     let dir = TempDir::new("others");
     let mut game = open(&dir);
+    let original = game.data.clone();
     let cand = game.other_candidates()[0];
     game.transfer(TransferRequest {
         salary_eur: Some(500_000),
@@ -242,9 +243,25 @@ fn other_source_signing_keeps_national_team() {
         ..TransferRequest::new(Source::Others, MANAGED, cand.player_id)
     })
     .unwrap();
-    assert!(game.roster(Source::Club(MANAGED)).contains(&cand));
-    assert!(!game.other_candidates().contains(&cand));
-    assert!(game.contract_of(&cand).is_some());
+    // The game moves him on the arrival date; until then he stays with his national team only.
+    assert!(!game.roster(Source::Club(MANAGED)).contains(&cand));
+    assert!(game.other_candidates().contains(&cand));
+    // Without an offer the contract takes the lowest free number (0..SQUAD and
+    // the negotiation's two numbers are taken).
+    let index = NEGOTIATION_INDEX + 1;
+    let (iid, pid) = (cand.internal_id, cand.player_id);
+    assert_eq!(
+        words(&game.data, FIRST_ROW + (SQUAD + 1) * RECORD),
+        [index, team_ref(MANAGED), 4, date(2025, 8, 7).pack(), 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, iid, pid, 5_000, 0, date(2028, 8, 31).pack()]
+    );
+    let pair: Vec<u8> = [index as u16, 0xFFFF, 0xFFFF].iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(&game.data[FIRST_ROW + deals::AGREED_OFFSET..][..6], &pair[..]);
+    assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS), [iid, pid, 5_000]);
+    // No offer and no fee entry.
+    let offers = FIRST_ROW + deals::OFFERS_OFFSET;
+    let unchanged = |off: usize, len: usize| game.data[off..off + len] == original[off..off + len];
+    assert!(unchanged(offers + deals::OFFER_RECORD, deals::OFFER_RECORD));
+    assert!(unchanged(deals::SEASON_DEALS, deals::DEAL_ENTRY));
 }
 
 #[test]
