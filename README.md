@@ -1,122 +1,65 @@
 # FL ML Desk
 
-Desktop editor (Rust + egui) for ongoing **Football Life 2026** and
-**PES 2021** Master League saves (`ML000000xx`):
+A simple Windows app for editing your **Football Life 2026** or **PES 2021**
+Master League save while your career is in progress.
 
-- **Sign players for your club** with the fee, annual salary and contract end
-  you choose. The fee comes out of the transfer budget and the contract is
-  registered straight away.
-- **Sell players from your club**: their contract is removed and the fee is
-  added to the transfer budget.
-- **Move players between AI clubs** (squads only).
-- **Edit finances**: transfer budget, annual salary budget, manager name.
-- **Update check** against GitHub Releases.
+What you can do:
 
-One Windows executable, no Python or installer: download `FLMLDesk-vX.Y.Z-windows-x64.exe`
-from the [Releases](../../releases) page. Other systems can build from source
-(`cargo build --release`).
+- **Sign players for your club.** You choose the transfer fee, the yearly
+  salary and when the contract ends. The fee is taken from your transfer
+  budget and the player joins right away.
+- **Sell players from your club.** Their contract ends and the fee goes into
+  your transfer budget.
+- **Move players between other (AI) clubs.**
+- **Change your finances:** transfer budget, yearly salary budget and manager
+  name.
 
-## Usage
+The app tells you when a new version is available.
 
-1. In the game, save the Master League and **quit to the main menu or close the
-   game**.
-2. Run `FLMLDesk-vX.Y.Z-windows-x64.exe`.
-3. **Buka save ML…** (open), or drag the save file onto the window. Saves live in
-   `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`.
-   - The club you manage and the in-game date are read from the save.
-   - An `EDIT00000000` in the same folder is used for player names.
-4. **Folder game (nama/OVR)…** (once): pick the game installation folder (the one
-   containing `download`). Names, positions, ages and OVR of every player come
-   from `Player.bin` in the `.cpk` archives.
-5. **Transfer pemain** tab: search a player, fill in **Fee transfer**,
-   **Gaji per tahun** (salary per year) and **Kontrak s.d.** (contract end), then
-   press **Transfer →**.
-   - Amounts accept `12.500.000`, `12,5jt`, `750rb`, `3m` or `500k`.
-   - Selecting one of your own players switches to **sell** mode.
-6. **Budget & manajer** tab: change the values and press **Terapkan** (apply).
-7. **Simpan ke save (backup otomatis)** (save with backup). The current file is
-   first copied to `FLMLDesk_backup\` next to the save. Then load the save in
-   the game.
+## Download
 
-Every change can be undone one by one before saving. **Mata uang** (currency)
-only affects display and input and uses the game's own rates (e.g. ¥ = € × 125).
-The save always stores amounts in units of €100.
+Go to the [Releases](../../releases) page and download
+`FLMLDesk-vX.Y.Z-windows-x64.exe`. Nothing to install: just open it.
 
-## What gets written
+## How to use
 
-Offsets are relative to the decrypted `data` block. "Confirmed" means matched
-against real FL26 saves (before a deal, deal agreed, player arrived) and the
-values shown in game.
+1. In the game, save your Master League and **go back to the main menu or close
+   the game**.
+2. Open `FLMLDesk-vX.Y.Z-windows-x64.exe`.
+3. Click **Open ML save…**, or drag your save file onto the window. Saves are in
+   `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`
+   and are named like `ML00000001`.
+   - The app finds your club and the in-game date by itself.
+4. **Game folder (names/OVR)…** (only once): choose the folder where the game is
+   installed. This fills in the names, positions, ages and OVR of all players.
+5. **Player transfers** tab: search for a player, fill in **Transfer fee**,
+   **Salary per year** and **Contract until**, then press **Transfer →**.
+   - You can type amounts like `12,500,000`, `12.5m` or `750k`.
+   - If you pick one of your own players, the app switches to selling.
+6. **Budget & manager** tab: change the values and press **Apply**.
+7. Click **Save (with automatic backup)**. A copy of your old save is kept in
+   the `FLMLDesk_backup` folder next to it, just in case.
+8. Load the save in the game and check your squad and finances.
 
-| Data | Location | Status |
-|---|---|---|
-| Club squad (40 slots) | `0x50 + club·0x690`, roster `+0x14C`, count `+0x426` | Confirmed |
-| Transfer budget | FL26 `0xC7DD00`, PES21 `0xC7DE00`, u32 × €100 | FL26 confirmed (¥307,001,287,500 = 24,560,103 × 12,500); PES21 from ML Money Tool |
-| Annual salary budget | budget `+0x14`, u32 × €100 | Confirmed; the game shows it minus the wage bill |
-| Manager name | `0x1942C0`, 46 bytes UTF-8 | Confirmed |
-| Your club's contract table | 48-byte rows, located through the squad | Confirmed, see below |
+You can undo changes one by one before saving. **Currency** only changes how
+amounts are shown and typed; it uses the same exchange rates as the game.
 
-Contract row (12 × u32):
+## Good to know
 
-| Word | Content |
-|---|---|
-| w0, w1 | internal id, player id |
-| w2 | annual salary (× €100) |
-| w3 | player value at signing (× €100) |
-| w4 | contract end (`year \| month<<16 \| day<<24`) |
-| w5 | row index (low 16 bits) |
-| w6 | club reference (low 14 bits = club index) |
-| w7 | status: 5 = under contract, 4 = deal agreed, 1/3 = negotiation |
-| w8 | contract start date |
+- **Loans are not supported.** Every transfer is permanent.
+- **Free agents:** players listed under "Others (national team, no club)" may
+  be free agents in the game. Moving free agents with an editor is known to
+  cause "ghost players", so check them in the game first.
+- Selling has not been tested on many saves yet. After selling, check in the
+  game that everything looks right.
+- Contracts are only changed for your own club. Moves between AI clubs only
+  change their squads.
+- A club can have at most 40 players. Shirt numbers and line-ups are set in the
+  game.
+- The game's finance report won't list the fees paid through the app.
+- On a PES 2021 save without the Football Life patch, budget editing has not
+  been tested yet. If the app can't find the budget, it won't let you edit it.
 
-What the game does on a signing, and the editor reproduces:
-
-- The fee is charged to the transfer budget **when the deal is agreed**. In the
-  sample saves the budget dropped by exactly the sum of three fees.
-- The stored salary budget is **not** changed. The new wage lowers the remaining
-  amount the game displays.
-- The contract row gets status 5, your club, and the in-game date as start
-  date. A player already in your negotiation list has his row completed in
-  place; anyone else gets a new row at the end of the table.
-
-On save the SHA-512 digests are recomputed and the output is decrypted again
-for verification before it is written. Saving is refused if any byte changed
-outside the recorded edits.
-
-## Limitations
-
-- Still unknown: the row index (w5) the game picks for a new signing, and the
-  player value (w3). The editor uses the next index and stores the fee as w3.
-  Replaying the Max Dowman signing on the `before` save matched the game's own
-  row except for these two fields.
-- **Selling** removes the contract row and moves later rows up. No sample save
-  of a sale exists yet; check in game.
-- **Loans are not supported.** All transfers are permanent.
-- **Free agents**: players under "Lainnya (timnas, tanpa klub)" (national team,
-  no club) can be *Others* or *free agents* in game. Moving free agents with an
-  editor is known to create "ghost players".
-- The fee history in the game's finance report is not extended.
-- AI clubs have no contracts edited; AI ↔ AI moves only change squads.
-- At most 40 players per club. Shirt numbers and line-ups are set in game.
-- The vanilla PES 2021 budget offset has not been tested on a real save. If the
-  structure does not match, budget editing is locked.
-
-## Releases & updates
-
-Every push to `main` runs the tests and cross-compiles the Windows `.exe` on a
-single Ubuntu runner (`.github/workflows/release.yml`). If `version` in `Cargo.toml` has no `vX.Y.Z`
-release yet, the workflow publishes it with the downloads. The app checks the
-latest release of the `repository` in `Cargo.toml` on start; **Cek update**
-checks manually.
-
-To release: bump `version` in `Cargo.toml` and push.
-
-## Development
-
-```bash
-cargo run --release                          # run the app
-cargo run --release -- path/to/ML00000000    # open a save directly
-cargo test --release                         # tests (synthetic ML saves, no game files)
-```
+## Credits
 
 Credits and third-party licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

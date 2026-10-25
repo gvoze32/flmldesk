@@ -26,28 +26,22 @@ fn normal(text: &str) -> String {
     text.nfkd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase()
 }
 
-/// `12.500.000`, `12,5jt`, `12.5m`, `750rb`, `750k` -> integer (ties to even, like the game tools).
+/// `12,500,000`, `12.5m`, `750k` -> integer (ties to even, like the game tools).
 fn parse_amount(text: &str) -> Result<i64, ()> {
     let mut s: String = text.trim().to_lowercase().chars().filter(|c| *c != ' ').collect();
     let mut mult = 1.0;
-    for (suffix, factor) in [("jt", 1e6), ("m", 1e6), ("rb", 1e3), ("k", 1e3)] {
+    for (suffix, factor) in [("m", 1e6), ("k", 1e3)] {
         if let Some(rest) = s.strip_suffix(suffix) {
             s = rest.to_string();
             mult = factor;
             break;
         }
     }
-    if s.is_empty() {
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
         return Err(());
     }
-    let value: f64 = if mult > 1.0 {
-        s.replace(',', ".").parse().map_err(|_| ())?
-    } else {
-        if !s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
-            return Err(());
-        }
-        s.replace(['.', ','], "").parse().map_err(|_| ())?
-    };
+    // Commas group thousands; a dot is the decimal point.
+    let value: f64 = s.replace(',', "").parse().map_err(|_| ())?;
     if !value.is_finite() || value < 0.0 {
         return Err(());
     }
@@ -148,7 +142,7 @@ fn search_combo<T: Copy + PartialEq>(
         .selected_text(selected_text)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            ui.add(egui::TextEdit::singleline(filter).hint_text("Cari…").desired_width(width - 20.0)).request_focus();
+            ui.add(egui::TextEdit::singleline(filter).hint_text("Search…").desired_width(width - 20.0)).request_focus();
             let q = normal(filter);
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 for (label, value) in items.iter().filter(|(l, _)| q.is_empty() || normal(l).contains(&q)) {
@@ -220,7 +214,7 @@ impl App {
             tx,
             rx,
             busy: 0,
-            status: "Buka file save Master League (ML000000xx). Simpan di game lalu keluar ke menu utama dulu.".into(),
+            status: "Open a Master League save (ML000000xx). In the game, save first and go back to the main menu.".into(),
             tab: Tab::Transfer,
             currency,
             club_items: Vec::new(),
@@ -272,7 +266,7 @@ impl App {
                     self.busy -= 1;
                     match result {
                         Ok((game, edit)) => self.opened(*game, edit),
-                        Err(e) => self.fail("Gagal membuka save", &e),
+                        Err(e) => self.fail("Couldn't open the save", &e),
                     }
                 }
                 Job::Names(result) => {
@@ -280,23 +274,23 @@ impl App {
                     match result {
                         Ok((catalog, count, source)) => {
                             self.catalog.merge(catalog);
-                            self.status = format!("{} pemain dimuat dari {source}.", fmt_int(count as i64));
+                            self.status = format!("{} players loaded from {source}.", fmt_int(count as i64));
                             self.results_dirty = true;
                         }
-                        Err(e) => self.fail("Gagal memuat nama pemain", &e),
+                        Err(e) => self.fail("Couldn't load player names", &e),
                     }
                 }
                 Job::Update { manual, result } => {
                     self.busy -= 1;
                     match result {
                         Ok(Some(release)) => {
-                            self.status = format!("Versi baru {} tersedia.", release.tag);
+                            self.status = format!("New version {} available.", release.tag);
                             self.update = Some(release);
                         }
                         Ok(None) if manual => {
-                            self.status = format!("Sudah versi terbaru (v{}).", update::CURRENT_VERSION);
+                            self.status = format!("You have the latest version (v{}).", update::CURRENT_VERSION);
                         }
-                        Err(e) if manual => self.fail("Cek update", &e),
+                        Err(e) if manual => self.fail("Check for updates", &e),
                         _ => {}
                     }
                 }
@@ -305,7 +299,7 @@ impl App {
     }
 
     fn fail(&mut self, title: &str, e: &Error) {
-        self.status = format!("Gagal: {e}");
+        self.status = format!("Error: {e}");
         error_dialog(title, &e.to_string());
     }
 
@@ -316,7 +310,7 @@ impl App {
     fn load_game_folder(&mut self, ctx: &egui::Context, folder: PathBuf) {
         self.spawn(ctx, move || {
             let mut catalog = PlayerCatalog::default();
-            Job::Names(catalog.load_game_folder(&folder).map(|n| (catalog, n, format!("folder game {}", folder.display()))))
+            Job::Names(catalog.load_game_folder(&folder).map(|n| (catalog, n, format!("game folder {}", folder.display()))))
         });
     }
 
@@ -335,14 +329,14 @@ impl App {
 
     // --- save file ------------------------------------------------------------
     fn open_save(&mut self, ctx: &egui::Context) {
-        if let Some(path) = FileDialog::new().set_title("Pilih save Master League").pick_file() {
+        if let Some(path) = FileDialog::new().set_title("Choose a Master League save").pick_file() {
             self.open_path(ctx, path);
         }
     }
 
     fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         if self.game.as_ref().is_some_and(|g| !g.history.is_empty())
-            && !confirm("Perubahan belum disimpan", "Buang perubahan dan buka save lain?")
+            && !confirm("Unsaved changes", "Discard your changes and open another save?")
         {
             return;
         }
@@ -358,13 +352,13 @@ impl App {
     }
 
     fn opened(&mut self, game: MasterLeague, edit: Option<(PlayerCatalog, usize)>) {
-        let mut msg = String::from("Save terbuka.");
+        let mut msg = String::from("Save opened.");
         if let Some((catalog, n)) = edit {
             self.catalog.merge(catalog);
-            msg += &format!(" Nama dari EDIT00000000 dimuat ({} pemain).", fmt_int(n as i64));
+            msg += &format!(" Names loaded from EDIT00000000 ({} players).", fmt_int(n as i64));
         }
         if let Some(e) = &game.finance_error {
-            msg += &format!(" PERINGATAN: {e}");
+            msg += &format!(" WARNING: {e}");
         }
         let mut items: Vec<(String, usize)> =
             game.teams.iter().map(|t| (format!("{} ({}) #{}", t.name, t.abbr, t.index), t.index)).collect();
@@ -373,10 +367,10 @@ impl App {
         let remembered = self.settings.clubs.get(&game.path.to_string_lossy().into_owned()).copied();
         let described = game.described_club;
         if let Some(date) = game.game_date {
-            msg += &format!(" Tanggal game: {date}.");
+            msg += &format!(" In-game date: {date}.");
         }
         self.game = Some(game);
-        self.club_info = "Pilih klubmu dulu (wajib untuk transfer masuk/keluar).".into();
+        self.club_info = "First choose the club you manage (needed to buy or sell players).".into();
         self.source = SourceFilter::All;
         self.selected = None;
         self.dest = None;
@@ -408,7 +402,7 @@ impl App {
                 self.club_info.clear();
                 self.results_dirty = true;
             }
-            Err(e) => error_dialog("Klub tidak bisa dipakai", &e.to_string()),
+            Err(e) => error_dialog("Can't use this club", &e.to_string()),
         }
     }
 
@@ -416,18 +410,18 @@ impl App {
         let Some(game) = self.game.as_mut() else { return };
         match game.write(target.as_deref()) {
             Ok((target, backup)) => {
-                let note = backup.as_ref().map(|b| format!("\nBackup file lama: {}", b.display())).unwrap_or_default();
-                self.status = format!("Tersimpan: {}.", target.display());
+                let note = backup.as_ref().map(|b| format!("\nBackup of the old file: {}", b.display())).unwrap_or_default();
+                self.status = format!("Saved: {}.", target.display());
                 MessageDialog::new()
-                    .set_title("Tersimpan")
+                    .set_title("Saved")
                     .set_description(format!(
-                        "Save ditulis dan diverifikasi:\n{}{note}\n\nLoad save ini di game lalu cek skuad & keuangan.",
+                        "Save written and checked:\n{}{note}\n\nLoad this save in the game and check your squad and finances.",
                         target.display()
                     ))
                     .show();
                 self.after_change();
             }
-            Err(e) => self.fail("Gagal menyimpan", &e),
+            Err(e) => self.fail("Couldn't save", &e),
         }
     }
 
@@ -474,7 +468,7 @@ impl App {
                 }
                 let club = match source {
                     Source::Club(i) => game.teams[i].name.clone(),
-                    Source::Others => "Lainnya (timnas, cek di game)".into(),
+                    Source::Others => "Others (national team, check in game)".into(),
                 };
                 let wage = if Some(source) == mine.map(Source::Club) {
                     game.contract_of(&player).map_or("?".into(), |c| self.to_display(c.annual_eur() as i64))
@@ -520,16 +514,16 @@ impl App {
         let Some(game) = &self.game else { return vec![] };
         let Some(mode) = mode else {
             return if game.managed_team.is_none() {
-                vec!["Pilih klubmu dulu agar transfer masuk/keluar bisa mencatat kontrak dan budget.".into()]
+                vec!["Choose your club first, so buying and selling can update contracts and budget.".into()]
             } else {
                 vec![]
             };
         };
         if mode == Mode::Ai {
-            return vec!["Transfer antar klub AI: hanya skuad yang dipindah. Fee & kontrak klub AI tidak diubah.".into()];
+            return vec!["Transfer between two AI clubs: only the squads change. Their fees and contracts stay the same.".into()];
         }
         let Ok(fee) = self.from_display(if self.fee.trim().is_empty() { "0" } else { &self.fee }) else {
-            return vec!["Fee tidak valid.".into()];
+            return vec!["The fee isn't a valid amount.".into()];
         };
         let fin = game.finances().ok();
         let wages = game.wage_bill_eur();
@@ -540,28 +534,28 @@ impl App {
             }
             if let (Some(f), Ok(wage)) = (&fin, self.from_display(&self.salary)) {
                 let left = f.salary_eur - wages;
-                lines.push(format!("Sisa salary budget (di game): {} → {}", self.to_display(left), self.to_display(left - wage)));
+                lines.push(format!("Salary budget left (in game): {} → {}", self.to_display(left), self.to_display(left - wage)));
             }
-            lines.push("Kontrak dibuat langsung berstatus resmi (seperti setelah deal selesai) — cek di game.".into());
+            lines.push("The contract starts right away, as if the deal were already done. Check it in the game.".into());
         } else {
             let contract = self.selected.and_then(|(_, p)| game.contract_of(&p));
             match contract {
-                Some(c) => lines.push(format!("Kontrak {}/thn s.d. {} akan dihapus.", self.to_display(c.annual_eur() as i64), c.end)),
-                None => lines.push("Kontrak pemain ini tidak ditemukan tunggal; transfer akan dibatalkan.".into()),
+                Some(c) => lines.push(format!("Contract of {}/yr until {} will be removed.", self.to_display(c.annual_eur() as i64), c.end)),
+                None => lines.push("This player's contract couldn't be found, so the transfer will be cancelled.".into()),
             }
             if let (true, Some(f)) = (self.use_tb, &fin) {
                 lines.push(format!("Transfer budget: {} → {}", self.to_display(f.transfer_eur), self.to_display(f.transfer_eur + fee)));
             }
         }
         if game.finance_error.is_some() && self.use_tb {
-            lines.push("Budget tidak terbaca di save ini: matikan opsi fee lewat transfer budget untuk melanjutkan.".into());
+            lines.push("The budget couldn't be read from this save. Untick \"Pay fee from transfer budget\" to continue.".into());
         }
         lines
     }
 
     fn do_transfer(&mut self) {
         let (Some((source, player)), Some(dest), Some(mode)) = (self.selected, self.dest, self.mode()) else {
-            error_dialog("Data kurang", "Pilih pemain dan klub tujuan.");
+            error_dialog("Missing details", "Choose a player and a destination club.");
             return;
         };
         let info = self.catalog.get(player.player_id);
@@ -581,16 +575,16 @@ impl App {
             Ok(())
         })();
         if parsed.is_err() {
-            error_dialog("Data tidak valid", "Periksa fee, gaji dan tanggal kontrak.");
+            error_dialog("Invalid details", "Check the fee, salary and contract date.");
             return;
         }
         if source == Source::Others
             && !confirm(
-                "Pemain tanpa klub",
+                "Player without a club",
                 &format!(
-                    "{} tidak terdaftar di klub mana pun (hanya di timnas).\n\nDi game, pemain ini bisa berstatus \
-                     \"Others\" atau FREE AGENT. Transfer free agent lewat editor diketahui bermasalah (pemain hantu). \
-                     Cek dulu di game.\n\nLanjutkan?",
+                    "{} isn't registered at any club (only at a national team).\n\nIn the game this player may be \
+                     listed as \"Others\" or as a FREE AGENT. Moving free agents with an editor is known to cause \
+                     problems (\"ghost players\"). Check in the game first.\n\nContinue?",
                     info.name
                 ),
             )
@@ -600,17 +594,17 @@ impl App {
         let game = self.game.as_mut().unwrap();
         match game.transfer(req) {
             Ok(op) => {
-                self.status = format!("Ditambahkan: {}  — Simpan untuk menulis ke file.", op.description);
+                self.status = format!("Added: {}  — press Save to write it to the file.", op.description);
                 self.after_change();
             }
-            Err(e) => error_dialog("Transfer dibatalkan", &e.to_string()),
+            Err(e) => error_dialog("Transfer cancelled", &e.to_string()),
         }
     }
 
     fn apply_finances(&mut self) {
         let parsed = (|| -> Result<(i64, i64), ()> { Ok((self.from_display(&self.tb)?, self.from_display(&self.sb)?)) })();
         let Ok((tb, sb)) = parsed else {
-            error_dialog("Angka tidak valid", "Periksa lagi angka budget.");
+            error_dialog("Invalid amount", "Check the budget amounts again.");
             return;
         };
         let manager = self.manager.clone();
@@ -620,7 +614,7 @@ impl App {
                 self.status = op.description.clone();
                 self.after_change();
             }
-            Err(e) => error_dialog("Tidak bisa", &e.to_string()),
+            Err(e) => error_dialog("Couldn't do that", &e.to_string()),
         }
     }
 
@@ -629,19 +623,19 @@ impl App {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
             ui.add_enabled_ui(self.busy == 0, |ui| {
-                if ui.button("📂 Buka save ML…").clicked() {
+                if ui.button("📂 Open ML save…").clicked() {
                     self.open_save(&ctx);
                 }
             });
-            if ui.button("Folder game (nama/OVR)…").clicked()
-                && let Some(folder) = FileDialog::new().set_title("Pilih folder game (berisi folder download)").pick_folder()
+            if ui.button("Game folder (names/OVR)…").clicked()
+                && let Some(folder) = FileDialog::new().set_title("Choose the game folder (the one with the download folder)").pick_folder()
             {
                 self.settings.game_folder = Some(folder.to_string_lossy().into_owned());
                 self.settings.store();
                 self.load_game_folder(&ctx, folder);
             }
-            if ui.button("Import nama / EDIT…").clicked()
-                && let Some(path) = FileDialog::new().set_title("Daftar nama (TXT/CSV) atau EDIT00000000").pick_file()
+            if ui.button("Import names / EDIT…").clicked()
+                && let Some(path) = FileDialog::new().set_title("Name list (TXT/CSV) or EDIT00000000").pick_file()
             {
                 self.spawn(&ctx, move || {
                     let mut catalog = PlayerCatalog::default();
@@ -655,7 +649,7 @@ impl App {
                 });
             }
             ui.separator();
-            ui.label("Mata uang:");
+            ui.label("Currency:");
             let before = self.currency;
             egui::ComboBox::from_id_salt("currency")
                 .selected_text(CURRENCIES[self.currency].0)
@@ -667,7 +661,7 @@ impl App {
                 self.results_dirty = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Cek update").clicked() {
+                if ui.small_button("Check for updates").clicked() {
                     self.check_updates(&ctx, true);
                 }
                 ui.weak(format!("v{}", update::CURRENT_VERSION));
@@ -679,42 +673,42 @@ impl App {
         if let Some(release) = self.update.clone() {
             egui::Frame::group(ui.style()).fill(ui.visuals().extreme_bg_color).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Versi baru {} tersedia (kamu memakai v{}).", release.tag, update::CURRENT_VERSION)).color(INFO).strong());
+                    ui.label(RichText::new(format!("New version {} available (you have v{}).", release.tag, update::CURRENT_VERSION)).color(INFO).strong());
                     if let Some(url) = &release.asset_url
                         && ui.button("⬇ Download").clicked()
                     {
                         ctx.open_url(egui::OpenUrl::new_tab(url));
                     }
-                    if ui.button("Lihat rilis").clicked() {
+                    if ui.button("What's new").clicked() {
                         ctx.open_url(egui::OpenUrl::new_tab(&release.page_url));
                     }
-                    if ui.small_button("Tutup").clicked() {
+                    if ui.small_button("Close").clicked() {
                         self.update = None;
                     }
                 });
             });
         }
         match &self.game {
-            Some(g) => ui.weak(format!("{}   ·   {}   ·   {} klub", g.path.display(), g.game, g.teams.len())),
-            None => ui.weak("Belum ada save yang dibuka"),
+            Some(g) => ui.weak(format!("{}   ·   {}   ·   {} clubs", g.path.display(), g.game, g.teams.len())),
+            None => ui.weak("No save opened yet"),
         };
         ui.weak(format!(
-            "Nama pemain: {} dari {}",
+            "Player names: {} from {}",
             fmt_int(self.catalog.players.len() as i64),
-            if self.catalog.sources.is_empty() { "belum ada".into() } else { self.catalog.sources.join(", ") }
+            if self.catalog.sources.is_empty() { "none yet".into() } else { self.catalog.sources.join(", ") }
         ));
         if self.game.is_some() {
             ui.horizontal(|ui| {
-                ui.strong("Klub yang kamu latih:");
+                ui.strong("Your club:");
                 let mine = self.game.as_ref().unwrap().managed_team;
-                let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— pilih —".into());
+                let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
                 let items = self.club_items.clone();
                 if let Some(index) = search_combo(ui, "my_club", 360.0, &text, &mut self.my_club_filter, &items) {
                     self.set_managed_club(index);
                 }
                 if let Some(i) = self.game.as_ref().unwrap().managed_team {
                     let g = self.game.as_ref().unwrap();
-                    ui.weak(format!("{}/40 pemain · {} kontrak", g.roster(Source::Club(i)).len(), g.contract_count()));
+                    ui.weak(format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count()));
                 }
                 ui.weak(&self.club_info);
             });
@@ -723,7 +717,7 @@ impl App {
 
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.strong("Perubahan belum disimpan:");
+        ui.strong("Unsaved changes:");
         egui::ScrollArea::vertical().max_height(90.0).id_salt("ops").show(ui, |ui| {
             if let Some(g) = &self.game {
                 for op in g.operations() {
@@ -733,30 +727,30 @@ impl App {
         });
         let pending = self.game.as_ref().is_some_and(|g| !g.history.is_empty());
         ui.horizontal(|ui| {
-            if ui.add_enabled(pending, egui::Button::new("↶ Batalkan terakhir")).clicked() {
+            if ui.add_enabled(pending, egui::Button::new("↶ Undo last change")).clicked() {
                 let game = self.game.as_mut().unwrap();
                 match game.undo() {
-                    Ok(text) => self.status = format!("Dibatalkan: {text}"),
-                    Err(e) => error_dialog("Tidak bisa", &e.to_string()),
+                    Ok(text) => self.status = format!("Undone: {text}"),
+                    Err(e) => error_dialog("Couldn't do that", &e.to_string()),
                 }
                 self.after_change();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(pending, egui::Button::new("Simpan sebagai…")).clicked()
+                if ui.add_enabled(pending, egui::Button::new("Save as…")).clicked()
                     && let Some(path) = FileDialog::new()
-                        .set_title("Simpan save sebagai")
+                        .set_title("Save as")
                         .set_file_name(self.game.as_ref().unwrap().path.file_name().unwrap_or_default().to_string_lossy())
                         .save_file()
                 {
                     self.save(Some(path));
                 }
-                if ui.add_enabled(pending, egui::Button::new("💾 Simpan ke save (backup otomatis)")).clicked() {
+                if ui.add_enabled(pending, egui::Button::new("💾 Save (with automatic backup)")).clicked() {
                     let name = self.game.as_ref().unwrap().path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                     if confirm(
-                        "Simpan",
+                        "Save",
                         &format!(
-                            "Timpa {name}?\nFile lama dibackup ke folder FLMLDesk_backup. Pastikan game sudah ditutup \
-                             atau berada di menu utama."
+                            "Overwrite {name}?\nThe old file is backed up to the FLMLDesk_backup folder. Make sure the \
+                             game is closed or on the main menu."
                         ),
                     ) {
                         self.save(None);
@@ -769,28 +763,28 @@ impl App {
 
     fn transfer_tab(&mut self, ui: &mut egui::Ui) {
         let Some(game) = &self.game else {
-            ui.label("Buka save ML dulu.");
+            ui.label("Open an ML save first.");
             return;
         };
         let mine = game.managed_team;
         ui.horizontal(|ui| {
-            ui.label("Cari (nama/ID):");
+            ui.label("Search (name/ID):");
             if ui.add(egui::TextEdit::singleline(&mut self.query).desired_width(220.0)).changed() {
                 self.results_dirty = true;
             }
-            ui.label("Dari:");
-            let mut sources = vec![("Semua klub".to_string(), SourceFilter::All)];
+            ui.label("From:");
+            let mut sources = vec![("All clubs".to_string(), SourceFilter::All)];
             if mine.is_some() {
-                sources.push(("Klub saya".into(), SourceFilter::Mine));
+                sources.push(("My club".into(), SourceFilter::Mine));
             }
-            sources.push(("Lainnya (timnas, tanpa klub)".into(), SourceFilter::Others));
+            sources.push(("Others (national team, no club)".into(), SourceFilter::Others));
             sources.extend(self.club_items.iter().map(|(l, i)| (l.clone(), SourceFilter::Club(*i))));
             let text = sources.iter().find(|(_, v)| *v == self.source).map(|(l, _)| l.clone()).unwrap_or_default();
             if let Some(source) = search_combo(ui, "source", 320.0, &text, &mut self.source_filter, &sources) {
                 self.source = source;
                 self.results_dirty = true;
             }
-            ui.weak(format!("{} pemain", fmt_int(self.results.len() as i64)));
+            ui.weak(format!("{} players", fmt_int(self.results.len() as i64)));
         });
         ui.add_space(4.0);
 
@@ -814,7 +808,7 @@ impl App {
             .column(Column::initial(130.0))
             .column(Column::exact(80.0))
             .header(22.0, |mut header| {
-                for title in ["Pemain", "Pos", "Umur", "OVR", "Klub", "Gaji/thn (klubmu)", "ID"] {
+                for title in ["Player", "Pos", "Age", "OVR", "Club", "Salary/yr (your club)", "ID"] {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -862,7 +856,7 @@ impl App {
             Some((source, player)) => {
                 let info = self.catalog.get(player.player_id);
                 ui.strong(format!(
-                    "{} · {} · {} th · OVR {} · {}",
+                    "{} · {} · age {} · OVR {} · {}",
                     info.name,
                     info.position.unwrap_or("-"),
                     info.age.map_or("-".into(), |a| a.to_string()),
@@ -871,18 +865,18 @@ impl App {
                 ));
             }
             None => {
-                ui.strong("Pilih pemain di tabel.");
+                ui.strong("Select a player in the table.");
             }
         }
         let mine = game.managed_team;
         let mut dest_items: Vec<(String, usize)> = Vec::new();
         if let Some(m) = mine {
-            dest_items.push((format!("★ {} (klub saya)", self.club_label(m)), m));
+            dest_items.push((format!("★ {} (my club)", self.club_label(m)), m));
         }
         dest_items.extend(self.club_items.iter().cloned());
         let mode = self.mode();
         egui::Grid::new("form").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
-            ui.label("Ke klub:");
+            ui.label("To club:");
             let text = self.dest.and_then(|d| dest_items.iter().find(|(_, i)| *i == d)).map(|(l, _)| l.clone()).unwrap_or_default();
             if let Some(d) = search_combo(ui, "dest", 360.0, &text, &mut self.dest_filter, &dest_items) {
                 self.dest = Some(d);
@@ -898,11 +892,11 @@ impl App {
 
             let money = matches!(mode, Some(Mode::In | Mode::Out));
             let incoming = mode == Some(Mode::In);
-            ui.label(if mode == Some(Mode::Out) { "Fee diterima:" } else { "Fee transfer:" });
+            ui.label(if mode == Some(Mode::Out) { "Fee received:" } else { "Transfer fee:" });
             ui.add_enabled_ui(money, |ui| ui.add_sized([150.0, 22.0], egui::TextEdit::singleline(&mut self.fee)));
-            ui.label("Gaji per tahun:");
+            ui.label("Salary per year:");
             ui.add_enabled_ui(incoming, |ui| ui.add_sized([150.0, 22.0], egui::TextEdit::singleline(&mut self.salary)));
-            ui.label("Kontrak s.d. (thn/bln/tgl):");
+            ui.label("Contract until (year/month/day):");
             ui.add_enabled_ui(incoming, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut self.end_year).range(2000..=2150));
@@ -912,7 +906,7 @@ impl App {
             });
             ui.end_row();
 
-            ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Fee lewat transfer budget"));
+            ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
             ui.end_row();
         });
         for line in self.preview(mode) {
@@ -923,11 +917,11 @@ impl App {
 
     fn budget_tab(&mut self, ui: &mut egui::Ui) {
         let Some(game) = &self.game else {
-            ui.label("Buka save ML dulu.");
+            ui.label("Open an ML save first.");
             return;
         };
         if let Some(e) = &game.finance_error {
-            ui.label(RichText::new(format!("Budget tidak bisa diedit: {e}")).color(WARN));
+            ui.label(RichText::new(format!("The budget can't be edited: {e}")).color(WARN));
             return;
         }
         let saved = game.finances().ok();
@@ -945,41 +939,41 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.tb).desired_width(220.0));
             ui.horizontal(|ui| {
                 for m in [10, 50, 100] {
-                    if ui.button(format!("+€{m} jt")).clicked() {
+                    if ui.button(format!("+€{m}m")).clicked() {
                         bump(&mut self.tb, m * 1_000_000);
                     }
                 }
             });
             ui.end_row();
-            ui.label(format!("Salary budget tahunan ({symbol}):"));
+            ui.label(format!("Yearly salary budget ({symbol}):"));
             ui.add(egui::TextEdit::singleline(&mut self.sb).desired_width(220.0));
             ui.horizontal(|ui| {
                 for m in [5, 20] {
-                    if ui.button(format!("+€{m} jt")).clicked() {
+                    if ui.button(format!("+€{m}m")).clicked() {
                         bump(&mut self.sb, m * 1_000_000);
                     }
                 }
             });
             ui.end_row();
-            ui.label("Nama manajer:");
+            ui.label("Manager name:");
             ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
             ui.end_row();
         });
         ui.add_space(8.0);
-        if ui.add_enabled(self.busy == 0, egui::Button::new("Terapkan")).clicked() {
+        if ui.add_enabled(self.busy == 0, egui::Button::new("Apply")).clicked() {
             self.apply_finances();
         }
         ui.add_space(8.0);
-        ui.weak("Angka bisa ditulis 12.500.000, 12,5jt, atau 750rb. Disimpan dalam kelipatan €100 seperti di game.");
+        ui.weak("You can type amounts like 12,500,000, 12.5m or 750k. They are saved in steps of €100, like in the game.");
         if let Some(f) = saved {
             ui.weak(format!(
-                "Di save sekarang: transfer {} · salary budget tahunan {}",
+                "In the save now: transfer {} · yearly salary budget {}",
                 self.to_display(f.transfer_eur),
                 self.to_display(f.salary_eur)
             ));
             if has_club {
                 ui.weak(format!(
-                    "Total gaji klubmu {} → sisa salary budget yang tampil di game ≈ {}",
+                    "Your club's total salaries {} → salary budget left in the game ≈ {}",
                     self.to_display(wages),
                     self.to_display(f.salary_eur - wages)
                 ));
@@ -1006,8 +1000,8 @@ impl eframe::App for App {
             self.top_bar(ui);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Transfer, RichText::new("Transfer pemain").strong());
-                ui.selectable_value(&mut self.tab, Tab::Budget, RichText::new("Budget & manajer").strong());
+                ui.selectable_value(&mut self.tab, Tab::Transfer, RichText::new("Player transfers").strong());
+                ui.selectable_value(&mut self.tab, Tab::Budget, RichText::new("Budget & manager").strong());
             });
             ui.add_space(2.0);
         });
@@ -1024,14 +1018,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn amounts_accept_indonesian_and_short_forms() {
-        assert_eq!(parse_amount("12.500.000"), Ok(12_500_000));
-        assert_eq!(parse_amount("12,5jt"), Ok(12_500_000));
+    fn amounts_accept_grouped_and_short_forms() {
+        assert_eq!(parse_amount("12,500,000"), Ok(12_500_000));
+        assert_eq!(parse_amount("12,500k"), Ok(12_500_000));
         assert_eq!(parse_amount("12.5 M"), Ok(12_500_000));
-        assert_eq!(parse_amount("750rb"), Ok(750_000));
+        assert_eq!(parse_amount("750k"), Ok(750_000));
         assert_eq!(parse_amount("2k"), Ok(2_000));
         assert!(parse_amount("").is_err());
-        assert!(parse_amount("-5jt").is_err());
+        assert!(parse_amount("-5m").is_err());
+        assert!(parse_amount("12.500.000").is_err());
         assert!(parse_amount("12a").is_err());
     }
 

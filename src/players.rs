@@ -122,7 +122,7 @@ impl PlayerCatalog {
     pub fn load_playerbin(&mut self, raw: &[u8], source: &str) -> Result<usize, Error> {
         let data = decompress_wesys(raw)?;
         if data.len() % PLAYERBIN_RECORD_SIZE != 0 {
-            return Err(Error::new(format!("{source}: ukuran Player.bin tidak valid")));
+            return Err(Error::new(format!("{source}: Player.bin has an unexpected size.")));
         }
         let mut count = 0;
         for base in (0..data.len()).step_by(PLAYERBIN_RECORD_SIZE) {
@@ -177,7 +177,7 @@ impl PlayerCatalog {
             total += self.load_cpk(&archive).unwrap_or(0);
         }
         if total == 0 {
-            return Err(Error::new(format!("Tidak ada Player.bin di CPK folder {}.", dir.display())));
+            return Err(Error::new(format!("No Player.bin found in the CPK files in {}.", dir.display())));
         }
         Ok(total)
     }
@@ -187,12 +187,12 @@ impl PlayerCatalog {
         let save = crypto::unpack(&blob, false)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if save.file_type() != "EDIT" {
-            return Err(Error::new(format!("{name} bukan file EDIT (tipe {}).", save.file_type())));
+            return Err(Error::new(format!("{name} isn't an EDIT file (type {}).", save.file_type())));
         }
         let data = &save.data;
         let used = if data.len() == EDIT_DATA_SIZE { u16_at(data, EDIT_PLAYER_COUNT_OFFSET) as usize } else { usize::MAX };
         if used > EDIT_MAX_PLAYERS {
-            return Err(Error::new(format!("{name}: struktur data EDIT tidak dikenali.")));
+            return Err(Error::new(format!("{name}: the EDIT data wasn't recognised.")));
         }
         let mut count = 0;
         for index in 0..used {

@@ -55,7 +55,7 @@ pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 /// Parse the GitHub "latest release" JSON; `Some` only when it is newer than `current`.
 pub fn newer_release(json: &str, current: &str, platform: &str) -> Result<Option<Release>, Error> {
     let release: GitHubRelease =
-        serde_json::from_str(json).map_err(|e| Error::new(format!("Respons GitHub tidak dikenali: {e}")))?;
+        serde_json::from_str(json).map_err(|e| Error::new(format!("Unexpected reply from GitHub: {e}")))?;
     if release.draft || release.prerelease {
         return Ok(None);
     }
@@ -82,17 +82,17 @@ pub fn repository_slug() -> Option<String> {
 
 /// Ask GitHub for the latest release (blocking; run off the UI thread).
 pub fn check() -> Result<Option<Release>, Error> {
-    let slug = repository_slug().ok_or_else(|| Error::new("Repository GitHub belum diatur di Cargo.toml."))?;
+    let slug = repository_slug().ok_or_else(|| Error::new("The GitHub repository isn't set in Cargo.toml."))?;
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into();
     let body = agent
         .get(format!("https://api.github.com/repos/{slug}/releases/latest"))
         .header("User-Agent", concat!("fl-ml-desk/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|e| Error::new(format!("Cek update gagal: {e}")))?
+        .map_err(|e| Error::new(format!("Couldn't check for updates: {e}")))?
         .body_mut()
         .read_to_string()
-        .map_err(|e| Error::new(format!("Cek update gagal: {e}")))?;
+        .map_err(|e| Error::new(format!("Couldn't check for updates: {e}")))?;
     newer_release(&body, CURRENT_VERSION, PLATFORM)
 }
 

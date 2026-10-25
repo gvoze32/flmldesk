@@ -163,7 +163,7 @@ pub struct ContractTable {
 impl ContractTable {
     pub fn detect(data: &[u8], club: usize, roster: &[Player]) -> Result<ContractTable, Error> {
         if roster.len() < 12 {
-            return Err(Error::new("Skuad terlalu sedikit untuk mengenali tabel kontrak dengan aman."));
+            return Err(Error::new("Your squad is too small to find its contracts safely."));
         }
         // Group candidate rows by offset modulo the record size.
         let mut groups: BTreeMap<usize, Vec<(usize, Player)>> = BTreeMap::new();
@@ -177,7 +177,7 @@ impl ContractTable {
             }
         }
         if groups.is_empty() {
-            return Err(Error::new("Tabel kontrak klubmu tidak ditemukan dari pemain di skuad."));
+            return Err(Error::new("Couldn't find your club's contracts from the players in the squad."));
         }
         let distinct = |v: &Vec<(usize, Player)>| v.iter().map(|(_, p)| *p).collect::<HashSet<_>>().len();
         let mut ranked: Vec<_> = groups.into_values().collect();
@@ -186,18 +186,18 @@ impl ContractTable {
         let seen: HashSet<Player> = anchors.iter().map(|(_, p)| *p).collect();
         if seen.len() < 10.max(roster.len().div_ceil(2)) {
             return Err(Error::new(format!(
-                "Hanya {} dari {} pemain punya kontrak yang cocok; tabel tidak diedit.",
+                "Only {} of {} players have a matching contract; nothing was changed.",
                 seen.len(),
                 roster.len()
             )));
         }
         if ranked.len() > 1 && distinct(&ranked[1]) as f64 >= seen.len() as f64 * 0.6 {
-            return Err(Error::new("Ada dua tabel kontrak yang sama-sama mungkin; tabel tidak diedit."));
+            return Err(Error::new("Found two possible contract lists; nothing was changed."));
         }
         let positions: Vec<usize> = anchors.iter().map(|(o, _)| *o).collect();
         let (lo, hi) = (*positions.iter().min().unwrap(), *positions.iter().max().unwrap());
         if hi - lo > RECORD * 200 {
-            return Err(Error::new("Kontrak pemain tidak berada dalam satu blok yang rapat."));
+            return Err(Error::new("Your players' contracts are spread out in an unexpected way; nothing was changed."));
         }
         let mut first = lo;
         while is_record(words_before(data, first)) {
@@ -210,7 +210,7 @@ impl ContractTable {
             let t = words(data, first + i * RECORD);
             if is_record(t) {
                 if trailing > 0 {
-                    return Err(Error::new("Tabel kontrak punya baris kosong di tengah; tabel tidak diedit."));
+                    return Err(Error::new("The contract list has an empty row in the middle; nothing was changed."));
                 }
             } else if is_blank(t) {
                 trailing += 1;
@@ -224,7 +224,7 @@ impl ContractTable {
             }
         }
         if blanks == 0 {
-            return Err(Error::new("Tidak ada baris kontrak kosong; tabel penuh atau tidak dikenali."));
+            return Err(Error::new("No free contract slot: the list is full or wasn't recognised."));
         }
         let mut refs: HashMap<u32, usize> = HashMap::new();
         for (off, _) in anchors {
@@ -234,7 +234,7 @@ impl ContractTable {
         let table = ContractTable { first, slots, team_ref };
         let live: HashSet<(u32, u32)> = table.rows(data).iter().map(|c| (c.internal_id, c.player_id)).collect();
         if !seen.iter().all(|p| live.contains(&(p.internal_id, p.player_id))) {
-            return Err(Error::new("Kontrak acuan tidak berada dalam satu tabel."));
+            return Err(Error::new("Your players' contracts aren't all in one list."));
         }
         Ok(table)
     }
@@ -274,7 +274,7 @@ impl ContractTable {
             self.find(data, player).into_iter().filter(|c| c.status == STATUS_CONTRACTED && c.club_index() == club).collect();
         if found.len() != 1 {
             return Err(Error::new(format!(
-                "Kontrak ID {} di klubmu tidak tunggal ({} baris); dibatalkan.",
+                "Player ID {} has more than one contract at your club ({} rows); cancelled.",
                 player.player_id,
                 found.len()
             )));
@@ -301,10 +301,10 @@ impl ContractTable {
         start: Date,
     ) -> Result<(usize, Vec<u8>), Error> {
         if !(1..10_000_000).contains(&salary_units) {
-            return Err(Error::new("Gaji harus antara €100 dan €999.999.900 per tahun."));
+            return Err(Error::new("Salary must be between €100 and €999,999,900 per year."));
         }
         if !(2000..=2150).contains(&end.year) || end <= start {
-            return Err(Error::new("Akhir kontrak harus setelah tanggal game dan sebelum 2150."));
+            return Err(Error::new("The contract must end after the in-game date and before 2150."));
         }
         let rows = self.rows(data);
         let next_index = rows.iter().map(|c| c.index).filter(|i| *i != NO_INDEX).max().unwrap_or(0) + 1;
@@ -314,7 +314,7 @@ impl ContractTable {
             [] => {
                 let offset = self.first + rows.len() * RECORD;
                 if offset >= self.first + self.slots * RECORD || !is_blank(words(data, offset)) {
-                    return Err(Error::new("Tabel kontrak penuh; jual/lepas pemain dulu."));
+                    return Err(Error::new("The contract list is full; sell or release a player first."));
                 }
                 let mut w = BLANK;
                 w[3] = value_units;
@@ -323,7 +323,7 @@ impl ContractTable {
             }
             [row] => {
                 if row.status == STATUS_CONTRACTED && row.team == self.team_ref {
-                    return Err(Error::new(format!("ID {} sudah punya kontrak di klubmu.", player.player_id)));
+                    return Err(Error::new(format!("Player ID {} already has a contract at your club.", player.player_id)));
                 }
                 let mut w = words(data, row.offset).unwrap();
                 if w[5] & 0xFFFF == NO_INDEX {
@@ -331,7 +331,7 @@ impl ContractTable {
                 }
                 (row.offset, w)
             }
-            _ => return Err(Error::new(format!("ID {} punya lebih dari satu baris kontrak; dibatalkan.", player.player_id))),
+            _ => return Err(Error::new(format!("Player ID {} has more than one contract; cancelled.", player.player_id))),
         };
         w[0] = player.internal_id;
         w[1] = player.player_id;
@@ -341,7 +341,7 @@ impl ContractTable {
         w[7] = (w[7] & !0xFF) | STATUS_CONTRACTED as u32;
         w[8] = start.pack();
         if !is_record(Some(w)) {
-            return Err(Error::new("Kontrak baru tidak lolos validasi format."));
+            return Err(Error::new("The new contract didn't pass the safety check."));
         }
         Ok((offset, encode(&w)))
     }

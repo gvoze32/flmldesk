@@ -173,7 +173,7 @@ impl SaveFile {
 /// Decrypt a save. `verify = false` skips the SHA-512 check (read-only use).
 pub fn unpack(blob: &[u8], verify: bool) -> Result<SaveFile, Error> {
     if blob.len() < ENC_HEADER_SIZE + FILE_HEADER_SIZE {
-        return Err(Error::new("File terlalu kecil untuk save PES/FL."));
+        return Err(Error::new("The file is too small to be a PES/FL save."));
     }
     let salt = &blob[256..320];
     let mut enc = crypt(&fold64(salt, &header_key_mask()), &blob[..ENC_HEADER_SIZE]);
@@ -187,7 +187,7 @@ pub fn unpack(blob: &[u8], verify: bool) -> Result<SaveFile, Error> {
     let sizes = [desc_size, logo_size, data_size, serial_len * 2];
     if pos + sizes.iter().sum::<usize>() != blob.len() {
         return Err(Error::new(
-            "Ukuran blok tidak cocok dengan ukuran file; bukan save PES 2021/FL atau file rusak.",
+            "The file size doesn't add up; it isn't a PES 2021/FL save or the file is damaged.",
         ));
     }
     let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(4);
@@ -199,7 +199,7 @@ pub fn unpack(blob: &[u8], verify: bool) -> Result<SaveFile, Error> {
         for (index, name) in ["desc", "logo", "data", "serial"].iter().enumerate() {
             if enc[index * 64..(index + 1) * 64] != sha512(&blocks[index]) {
                 return Err(Error::new(format!(
-                    "Hash SHA-512 blok {name} tidak cocok; file rusak atau bukan save PES 2021/FL."
+                    "Part of the file ({name}) is damaged, or it isn't a PES 2021/FL save."
                 )));
             }
         }

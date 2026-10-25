@@ -130,7 +130,7 @@ pub fn fmt_int(value: i64) -> String {
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push('.');
+            out.push(',');
         }
         out.push(c);
     }
@@ -175,17 +175,17 @@ pub struct MasterLeague {
 
 impl MasterLeague {
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let path = std::path::absolute(path).map_err(|_| Error::new("File tidak ditemukan."))?;
-        let meta = std::fs::metadata(&path).map_err(|_| Error::new("File tidak ditemukan."))?;
+        let path = std::path::absolute(path).map_err(|_| Error::new("File not found."))?;
+        let meta = std::fs::metadata(&path).map_err(|_| Error::new("File not found."))?;
         if !meta.is_file() || meta.len() > MAX_SAVE {
-            return Err(Error::new("File tidak ditemukan atau ukurannya tidak wajar untuk save ML."));
+            return Err(Error::new("File not found, or its size doesn't look like an ML save."));
         }
         let blob = std::fs::read(&path).map_err(|e| Error::new(e.to_string()))?;
         let save = crypto::unpack(&blob, true)?;
         if save.file_type() != "ML" {
             let t = save.file_type();
             return Err(Error::new(format!(
-                "Ini bukan save Master League (tipe file: {}).",
+                "This isn't a Master League save (file type: {}).",
                 if t.is_empty() { "?" } else { &t }
             )));
         }
@@ -247,7 +247,7 @@ impl MasterLeague {
     fn team(&self, index: usize) -> Result<Team, Error> {
         let base = Self::base(index);
         if base + RECORD_SIZE > self.data.len() {
-            return Err(Error::new("Tabel klub melewati batas data save."));
+            return Err(Error::new("The club list in this save looks damaged."));
         }
         Ok(Team {
             index,
@@ -272,11 +272,11 @@ impl MasterLeague {
             }
         }
         if !(400..=750).contains(&count) {
-            return Err(Error::new("Batas daftar klub vs timnas tidak bisa dipastikan; save ini tidak diedit."));
+            return Err(Error::new("Couldn't tell clubs and national teams apart; this save was not changed."));
         }
         let teams = (0..count).map(|i| self.team(i)).collect::<Result<Vec<_>, _>>()?;
         if teams.iter().any(|t| t.name.is_empty()) {
-            return Err(Error::new("Ada nama klub kosong di tabel klub."));
+            return Err(Error::new("A club in this save has no name."));
         }
         Ok(teams)
     }
@@ -303,7 +303,7 @@ impl MasterLeague {
             .is_ok_and(|n| !n.trim().is_empty() && !n.chars().any(|c| c < ' '))
             && raw[end..].iter().all(|&b| b == 0);
         if raw.is_empty() || !name_ok {
-            return Err("Nama manajer tidak ditemukan di lokasi yang dikenal; budget tidak diedit.".into());
+            return Err("Couldn't find the manager name in this save, so the budget can't be edited.".into());
         }
         // No cross-variant fallback: the other game's offset can hold a look-alike block.
         let off = if self.game.contains("Football Life") { FL26_FINANCE } else { PES21_FINANCE };
@@ -311,19 +311,19 @@ impl MasterLeague {
             && (4..SALARY_BUDGET_OFFSET).step_by(4).all(|gap| u32_at(&self.data, off + gap) == 0)
             && u32_at(&self.data, off) < 0x8000_0000
             && (1..0x8000_0000).contains(&u32_at(&self.data, off + SALARY_BUDGET_OFFSET));
-        if plausible { Ok(off) } else { Err("Blok budget tidak dikenali di save ini; budget tidak diedit.".into()) }
+        if plausible { Ok(off) } else { Err("Couldn't find the budget in this save, so it can't be edited.".into()) }
     }
 
     // --- rosters ---------------------------------------------------------
     fn raw_roster(&self, index: usize) -> Result<(usize, Vec<Player>), Error> {
         if index >= self.teams.len() && !self.national.contains(&index) {
-            return Err(Error::new("Klub tidak valid."));
+            return Err(Error::new("Invalid club."));
         }
         let base = Self::base(index);
         let n = (u16_at(&self.data, base + COUNT_OFFSET) & COUNT_MASK) as usize;
         let name = self.team(index)?.name;
         if n > MAX_ROSTER {
-            return Err(Error::new(format!("Jumlah pemain {name} tidak valid: {n}.")));
+            return Err(Error::new(format!("{name} has an invalid number of players: {n}.")));
         }
         let slots: Vec<Player> = (0..MAX_ROSTER)
             .map(|j| {
@@ -332,10 +332,10 @@ impl MasterLeague {
             })
             .collect();
         if slots[..n].contains(&EMPTY) {
-            return Err(Error::new(format!("Skuad {name} punya slot kosong di tengah.")));
+            return Err(Error::new(format!("{name}'s squad has an empty slot in the middle.")));
         }
         if slots[n..].iter().any(|p| *p != EMPTY) {
-            return Err(Error::new(format!("Slot kosong skuad {name} berisi data yang tidak dikenal.")));
+            return Err(Error::new(format!("{name}'s squad has unknown data in its empty slots.")));
         }
         Ok((n, slots))
     }
@@ -386,7 +386,7 @@ impl MasterLeague {
     pub fn source_name(&self, source: Source) -> String {
         match source {
             Source::Club(i) => self.teams[i].name.clone(),
-            Source::Others => "Lainnya (timnas)".into(),
+            Source::Others => "Others (national team)".into(),
         }
     }
 
@@ -432,7 +432,7 @@ impl MasterLeague {
     }
 
     pub fn undo(&mut self) -> Result<String, Error> {
-        let op = self.history.pop().ok_or_else(|| Error::new("Tidak ada perubahan untuk dibatalkan."))?;
+        let op = self.history.pop().ok_or_else(|| Error::new("Nothing to undo."))?;
         for (offset, old) in op.patches.iter().rev() {
             self.data[*offset..offset + old.len()].copy_from_slice(old);
         }
@@ -445,7 +445,7 @@ impl MasterLeague {
 
     fn write_roster(&mut self, index: usize, players: &[Player]) -> Result<(), Error> {
         if players.len() > MAX_ROSTER {
-            return Err(Error::new("Skuad tujuan akan melebihi 40 pemain."));
+            return Err(Error::new("The destination squad would go over 40 players."));
         }
         let base = Self::base(index);
         let mut bytes = Vec::with_capacity(MAX_ROSTER * 8);
@@ -477,7 +477,7 @@ impl MasterLeague {
         let value = u32::try_from(value)
             .ok()
             .filter(|v| *v < 0x8000_0000)
-            .ok_or_else(|| Error::new(format!("{label} di luar rentang yang bisa disimpan.")))?;
+            .ok_or_else(|| Error::new(format!("{label} is too high or too low for the game.")))?;
         self.patch(offset, &value.to_le_bytes());
         Ok(())
     }
@@ -486,7 +486,7 @@ impl MasterLeague {
         let off = self.finance_at()?;
         let units = u32_at(&self.data, off) as i64 + div_round_even(delta_eur, MONEY_UNIT);
         if units < 0 {
-            return Err(Error::new(format!("Transfer budget tidak cukup: kurang {}.", fmt_eur(-units * MONEY_UNIT))));
+            return Err(Error::new(format!("Not enough transfer budget: {} short.", fmt_eur(-units * MONEY_UNIT))));
         }
         self.set_u32(off, units.min(0x7FFF_FFFF), "Transfer budget")
     }
@@ -496,13 +496,16 @@ impl MasterLeague {
         let off = self.finance_at()?;
         let name = manager_name.trim();
         if name.is_empty() || name.len() >= MANAGER_NAME_SIZE {
-            return Err(Error::new(format!("Nama manajer wajib diisi, maksimal {} byte UTF-8.", MANAGER_NAME_SIZE - 1)));
+            return Err(Error::new(format!(
+                "Enter a manager name of at most {} letters (fewer with accents or special characters).",
+                MANAGER_NAME_SIZE - 1
+            )));
         }
         if manager_name.chars().any(|c| c < ' ') {
-            return Err(Error::new("Nama manajer berisi karakter tidak valid."));
+            return Err(Error::new("The manager name contains characters that aren't allowed."));
         }
         if transfer_eur == before.transfer_eur && salary_eur == before.salary_eur && name == before.manager_name {
-            return Err(Error::new("Tidak ada nilai yang berubah."));
+            return Err(Error::new("Nothing was changed."));
         }
         let name = name.to_string();
         self.atomic(move |g| {
@@ -519,9 +522,9 @@ impl MasterLeague {
                 let mut bytes = name.as_bytes().to_vec();
                 bytes.resize(MANAGER_NAME_SIZE, 0);
                 g.patch(MANAGER_NAME, &bytes);
-                changes.push(format!("manajer \"{}\" → \"{name}\"", before.manager_name));
+                changes.push(format!("manager \"{}\" → \"{name}\"", before.manager_name));
             }
-            Ok(format!("Keuangan: {}", changes.join("; ")))
+            Ok(format!("Finances: {}", changes.join("; ")))
         })
     }
 
@@ -529,14 +532,14 @@ impl MasterLeague {
     /// Select the club the user manages; returns the number of players under contract.
     pub fn set_managed_team(&mut self, index: usize) -> Result<usize, Error> {
         if !self.history.is_empty() {
-            return Err(Error::new("Simpan atau batalkan perubahan dulu sebelum ganti klub."));
+            return Err(Error::new("Save or undo your changes before switching clubs."));
         }
         if index >= self.teams.len() {
-            return Err(Error::new("Pilih klub yang kamu latih."));
+            return Err(Error::new("Choose the club you manage."));
         }
         let roster = self.club_roster(index);
         let table = ContractTable::detect(&self.data, index, &roster)
-            .map_err(|e| Error::new(format!("Tabel kontrak {} tidak dikenali: {e}", self.teams[index].name)))?;
+            .map_err(|e| Error::new(format!("Couldn't read the contracts of {}: {e}", self.teams[index].name)))?;
         let count = table.contracts(&self.data, index).len();
         self.managed_team = Some(index);
         self.contracts = Some(table);
@@ -584,42 +587,42 @@ impl MasterLeague {
         if let Source::Club(i) = req.source
             && i >= self.teams.len()
         {
-            return Err(Error::new("Klub asal tidak valid."));
+            return Err(Error::new("The player's current club isn't valid."));
         }
         if req.dest >= self.teams.len() {
-            return Err(Error::new("Klub tujuan harus klub sungguhan."));
+            return Err(Error::new("The destination must be a real club, not a national team."));
         }
         if req.source == Source::Club(req.dest) {
-            return Err(Error::new("Klub asal dan tujuan sama."));
+            return Err(Error::new("From and to are the same club."));
         }
         if req.fee_eur < 0 {
-            return Err(Error::new("Fee tidak boleh negatif."));
+            return Err(Error::new("The fee can't be negative."));
         }
         let mine = self.managed_team;
         let incoming = Some(req.dest) == mine;
         let outgoing = matches!(req.source, Source::Club(i) if Some(i) == mine);
         if (incoming || outgoing) && self.contracts.is_none() {
-            return Err(Error::new("Pilih dulu klub yang kamu latih."));
+            return Err(Error::new("First choose the club you manage."));
         }
         if (incoming || outgoing)
             && req.use_transfer_budget
             && req.fee_eur != 0
             && let Some(e) = &self.finance_error
         {
-            return Err(Error::new(format!("{e} Matikan opsi fee lewat transfer budget untuk lanjut.")));
+            return Err(Error::new(format!("{e} Untick \"Pay fee from transfer budget\" to continue.")));
         }
         let src_roster = self.roster(req.source);
         let dst_roster = self.club_roster(req.dest);
         let chosen: Vec<Player> = src_roster.iter().copied().filter(|p| p.player_id == req.player_id).collect();
         if chosen.len() != 1 {
-            return Err(Error::new("Pemain tidak ada (atau ganda) di klub asal."));
+            return Err(Error::new("Player not found (or listed twice) at their current club."));
         }
         let player = chosen[0];
         if dst_roster.len() >= MAX_ROSTER {
-            return Err(Error::new(format!("{} sudah 40 pemain.", self.teams[req.dest].name)));
+            return Err(Error::new(format!("{} already has 40 players.", self.teams[req.dest].name)));
         }
         if dst_roster.iter().any(|p| p.player_id == req.player_id) {
-            return Err(Error::new("Pemain sudah ada di klub tujuan."));
+            return Err(Error::new("The player is already at the destination club."));
         }
         let elsewhere: Vec<String> = self
             .club_of(req.player_id)
@@ -629,13 +632,13 @@ impl MasterLeague {
             .map(|i| self.teams[i].name.clone())
             .collect();
         if !elsewhere.is_empty() {
-            return Err(Error::new(format!("Pemain juga terdaftar di klub lain: {}", elsewhere.join(", "))));
+            return Err(Error::new(format!("The player is also listed at another club: {}", elsewhere.join(", "))));
         }
         if incoming && (req.salary_eur.is_none() || req.contract_end.is_none()) {
-            return Err(Error::new("Isi gaji dan akhir kontrak untuk pemain yang masuk ke klubmu."));
+            return Err(Error::new("Enter a salary and contract end date for a player joining your club."));
         }
         if incoming && self.game_date.is_none() {
-            return Err(Error::new("Tanggal game tidak terbaca dari save; kontrak tidak dibuat."));
+            return Err(Error::new("Couldn't read the in-game date from the save, so no contract was created."));
         }
         let label = req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id));
         let header = format!("{label}: {} → {}", self.source_name(req.source), self.teams[req.dest].name);
@@ -645,10 +648,10 @@ impl MasterLeague {
                 let table = g.contracts.clone().unwrap();
                 let (offset, bytes, contract) = table.removal(&g.data, &player, mine.unwrap())?;
                 g.patch(offset, &bytes);
-                parts.push(format!("kontrak {}/thn dihapus", fmt_eur(contract.annual_eur() as i64)));
+                parts.push(format!("contract of {}/yr removed", fmt_eur(contract.annual_eur() as i64)));
                 if req.use_transfer_budget && req.fee_eur != 0 {
                     g.adjust_transfer_budget(req.fee_eur)?;
-                    parts.push(format!("fee masuk {}", fmt_eur(req.fee_eur)));
+                    parts.push(format!("fee received {}", fmt_eur(req.fee_eur)));
                 }
             }
             if incoming {
@@ -662,7 +665,7 @@ impl MasterLeague {
                 let table = g.contracts.clone().unwrap();
                 let (offset, record) = table.signing(&g.data, &player, units, value, end, g.game_date.unwrap())?;
                 g.patch(offset, &record);
-                parts.push(format!("gaji {}/thn s.d. {end}", fmt_eur(units as i64 * SALARY_UNIT as i64)));
+                parts.push(format!("salary {}/yr until {end}", fmt_eur(units as i64 * SALARY_UNIT as i64)));
             }
             if let Source::Club(i) = req.source {
                 let rest: Vec<Player> = src_roster.iter().copied().filter(|p| p.player_id != req.player_id).collect();
@@ -674,13 +677,13 @@ impl MasterLeague {
             if let Source::Club(i) = req.source
                 && g.club_roster(i).contains(&player)
             {
-                return Err(Error::new("Pemeriksaan akhir gagal: pemain masih di klub asal."));
+                return Err(Error::new("Final check failed: the player is still at the old club."));
             }
             if !g.club_roster(req.dest).contains(&player) {
-                return Err(Error::new("Pemeriksaan akhir gagal: pemain tidak masuk klub tujuan."));
+                return Err(Error::new("Final check failed: the player didn't join the new club."));
             }
             if incoming && g.contract_of(&player).is_none() {
-                return Err(Error::new("Pemeriksaan akhir gagal: kontrak baru tidak terbaca."));
+                return Err(Error::new("Final check failed: the new contract can't be read."));
             }
             Ok(parts.join("; "))
         })
@@ -701,7 +704,7 @@ impl MasterLeague {
 
     pub fn build(&self) -> Result<Vec<u8>, Error> {
         if !self.changes_are_journaled() {
-            return Err(Error::new("Terdeteksi perubahan di luar field yang diizinkan; penyimpanan dibatalkan."));
+            return Err(Error::new("Unexpected changes found in the save; nothing was saved."));
         }
         let mut save = self.save.clone();
         save.data = self.data.clone();
@@ -713,7 +716,7 @@ impl MasterLeague {
             || check.serial != save.serial
             || check.file_header != save.file_header
         {
-            return Err(Error::new("Verifikasi file hasil gagal; tidak ada yang ditulis."));
+            return Err(Error::new("Couldn't confirm the new file is correct; nothing was written."));
         }
         Ok(out)
     }
@@ -721,14 +724,14 @@ impl MasterLeague {
     /// Write the edited save. Overwriting backs up the current file first.
     pub fn write(&mut self, target: Option<&Path>) -> Result<(PathBuf, Option<PathBuf>), Error> {
         if self.history.is_empty() {
-            return Err(Error::new("Belum ada perubahan."));
+            return Err(Error::new("There are no changes yet."));
         }
         let out = self.build()?;
         let target = match target {
             Some(t) => std::path::absolute(t).map_err(|e| Error::new(e.to_string()))?,
             None => self.path.clone(),
         };
-        let io = |e: std::io::Error| Error::new(format!("Gagal menulis: {e}"));
+        let io = |e: std::io::Error| Error::new(format!("Couldn't write the file: {e}"));
         let mut backup = None;
         if target.exists() {
             let folder = target.parent().unwrap_or(Path::new(".")).join(BACKUP_DIR);

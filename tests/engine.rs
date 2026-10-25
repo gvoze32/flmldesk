@@ -193,8 +193,8 @@ fn other_source_signing_keeps_national_team() {
 fn manager_rename_keeps_neighbouring_byte() {
     let dir = TempDir::new("rename");
     let mut game = open(&dir);
-    game.set_finances(50_000_000, 20_000_000, "Pelatih Baru").unwrap();
-    assert_eq!(game.finances().unwrap().manager_name, "Pelatih Baru");
+    game.set_finances(50_000_000, 20_000_000, "New Coach").unwrap();
+    assert_eq!(game.finances().unwrap().manager_name, "New Coach");
     assert_eq!(game.data[ml::MANAGER_NAME + ml::MANAGER_NAME_SIZE], b'V');
     assert!(game.set_finances(50_000_000, 20_000_000, &"x".repeat(46)).is_err());
 }
@@ -204,7 +204,7 @@ fn undo_restores_exact_bytes() {
     let dir = TempDir::new("undo");
     let mut game = open(&dir);
     let original = game.data.clone();
-    game.set_finances(99_000_000, 30_000_000, "Pelatih Baru").unwrap();
+    game.set_finances(99_000_000, 30_000_000, "New Coach").unwrap();
     game.transfer(incoming(7, club_player(7, 1).player_id, 1_000_000, 900_000, date(2028, 8, 31))).unwrap();
     game.transfer(TransferRequest { fee_eur: 500_000, ..TransferRequest::new(Source::Club(MANAGED), 9, club_player(0, 4).player_id) })
         .unwrap();
@@ -261,5 +261,5 @@ fn rounding_matches_python_ties_to_even() {
     assert_eq!(ml::eur_to_units(77_000_050), 770_000);
     assert_eq!(ml::eur_to_units(77_000_150), 770_002);
     assert_eq!(ml::div_round_even(-12_345_678, 100), -123_457);
-    assert_eq!(ml::fmt_eur(12_345_678), "€12.345.678");
+    assert_eq!(ml::fmt_eur(12_345_678), "€12,345,678");
 }

@@ -88,7 +88,7 @@ pub fn build_data(localized: bool) -> Vec<u8> {
         } else {
             (format!("Nation {n}"), format!("N{n:02}"))
         };
-        // One club player plus two players without a club ("Lainnya").
+        // One club player plus two players without a club ("Others").
         let players = [
             club_player(n, 0),
             ml::Player { internal_id: (500_000 + n * 2) as u32, player_id: (900_000 + n * 2) as u32 },
