@@ -23,7 +23,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT};
+use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED};
+use crate::deals::{AgreedDeal, DealTables};
 use crate::{Error, crypto};
 
 pub const TABLE_START: usize = 0x50;
@@ -572,14 +573,15 @@ impl MasterLeague {
         }
     }
 
-    /// Same month/day as the club's existing contracts, three seasons ahead of the game date.
-    pub fn default_contract_end(&self) -> Date {
+    /// Same month/day as the club's existing contracts, `seasons` years after the game date.
+    pub fn contract_end_in(&self, seasons: u16) -> Date {
         let year = self.game_date.map(|d| d.year).unwrap_or_else(|| chrono::Datelike::year(&chrono::Local::now()) as u16);
         let (month, day) = match (&self.contracts, self.managed_team) {
             (Some(t), Some(club)) => t.contracts(&self.data, club).first().map_or((6, 30), |c| (c.end.month, c.end.day)),
             _ => (6, 30),
         };
-        Date::new((year + 3).min(2150), month, day).unwrap_or(Date { year: (year + 3).min(2150), month: 6, day: 30 })
+        let year = (year + seasons).min(2150);
+        Date::new(year, month, day).unwrap_or(Date { year, month: 6, day: 30 })
     }
 
     // --- transfers --------------------------------------------------------
@@ -662,10 +664,42 @@ impl MasterLeague {
                 }
                 let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).unwrap_or(0);
                 let value = u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0);
+                let salary = fmt_eur(units as i64 * SALARY_UNIT as i64);
                 let table = g.contracts.clone().unwrap();
+                // From a club: an agreed deal, and the game moves the player on the
+                // next day. Saves whose transfer lists aren't recognised, and
+                // players without a club (no sample of their deal yet), join right away.
+                let tables = match req.source {
+                    Source::Club(seller) => Some((seller, DealTables::locate(&g.data, &table))),
+                    Source::Others => None,
+                };
+                if let Some((seller, Ok(tables))) = &tables {
+                    let arrival = g.game_date.unwrap().next_day();
+                    let deal = AgreedDeal {
+                        player,
+                        buyer_ref: table.team_ref,
+                        seller_ref: u32_at(&g.data, Self::base(*seller)),
+                        fee_units: value,
+                        salary_units: units,
+                        value_units: value,
+                        end,
+                        arrival,
+                    };
+                    for (offset, bytes) in tables.agree(&g.data, &table, &deal)? {
+                        g.patch(offset, &bytes);
+                    }
+                    if !table.find(&g.data, &player).iter().any(|c| c.status == STATUS_AGREED && c.team == table.team_ref) {
+                        return Err(Error::new("Final check failed: the agreed deal can't be read."));
+                    }
+                    parts.push(format!("deal agreed, arrives {arrival}; salary {salary}/yr until {end}"));
+                    return Ok(parts.join("; "));
+                }
                 let (offset, record) = table.signing(&g.data, &player, units, value, end, g.game_date.unwrap())?;
                 g.patch(offset, &record);
-                parts.push(format!("salary {}/yr until {end}", fmt_eur(units as i64 * SALARY_UNIT as i64)));
+                parts.push(format!("salary {salary}/yr until {end}"));
+                if matches!(tables, Some((_, Err(_)))) {
+                    parts.push("joined right away (this save's transfer lists weren't recognised)".into());
+                }
             }
             if let Source::Club(i) = req.source {
                 let rest: Vec<Player> = src_roster.iter().copied().filter(|p| p.player_id != req.player_id).collect();

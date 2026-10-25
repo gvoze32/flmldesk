@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use fl_ml_desk::contracts::{BLANK, RECORD};
+use fl_ml_desk::deals;
 use fl_ml_desk::crypto;
 use fl_ml_desk::masterleague::{self as ml, Finances, MasterLeague, Source, TransferRequest};
 
@@ -57,7 +58,8 @@ fn discovers_clubs_finances_contracts_and_description() {
     assert_eq!(game.wage_bill_eur(), expected_wages);
     assert_eq!(game.game_date, Some(date(2025, 8, 6)));
     assert_eq!(game.described_club, Some(MANAGED));
-    assert_eq!(game.default_contract_end(), date(2028, 8, 31));
+    assert_eq!(game.contract_end_in(3), date(2028, 8, 31));
+    assert_eq!(game.contract_end_in(1), date(2026, 8, 31));
     assert_eq!(game.other_candidates().len(), 2 * NATIONAL);
 }
 
@@ -80,11 +82,15 @@ fn pes21_budget_block_is_found_at_its_own_offset() {
 }
 
 #[test]
-fn new_signing_appends_contract_and_charges_only_the_fee() {
-    let dir = TempDir::new("incoming");
-    let mut game = open(&dir);
+fn unrecognised_lists_fall_back_to_joining_right_away() {
+    // The row before contract slot 0 lost its marker, so no agreed deal can be written.
+    let mut data = build_data(false);
+    data[FIRST_ROW - RECORD + 32] ^= 1;
+    let mut game = open_with(&TempDir::new("incoming"), data);
+    let original = game.data.clone();
     let target = club_player(7, 2);
-    game.transfer(incoming(7, target.player_id, 12_345_678, 2_500_049, date(2029, 8, 31))).unwrap();
+    let op = game.transfer(incoming(7, target.player_id, 12_345_678, 2_500_049, date(2029, 8, 31))).unwrap();
+    assert!(op.description.contains("joined right away"));
     let fin = game.finances().unwrap();
     assert_eq!(fin.transfer_eur, 50_000_000 - 12_345_700);
     // The game derives the remaining salary budget from the wage bill.
@@ -92,39 +98,91 @@ fn new_signing_appends_contract_and_charges_only_the_fee() {
     assert!(game.roster(Source::Club(MANAGED)).contains(&target));
     assert!(!game.roster(Source::Club(7)).contains(&target));
     let c = game.contract_of(&target).unwrap();
-    // Appended after the last row (squad + negotiation + unassigned).
-    assert_eq!(c.offset, FIRST_ROW + (SQUAD + 2) * RECORD);
+    // Appended after the last row (squad + negotiation); the row before it is untouched.
+    assert_eq!(c.offset, FIRST_ROW + (SQUAD + 1) * RECORD);
+    assert_eq!(words(&game.data, c.offset - RECORD), words(&original, c.offset - RECORD));
     assert_eq!((c.salary_units, c.value_units, c.end), (25_000, 123_457, date(2029, 8, 31)));
-    assert_eq!((c.index, c.team, c.status, c.start), (32, team_ref(MANAGED), 5, Some(date(2025, 8, 6))));
-    assert_eq!(&words(&game.data, c.offset)[9..], &[0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF]);
+    assert_eq!((c.index, c.team, c.status, c.start), (NEGOTIATION_INDEX + 1, team_ref(MANAGED), 5, Some(date(2025, 8, 6))));
+    assert_eq!(&words(&game.data, c.offset)[4..7], &[0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF]);
+    assert_eq!(words(&game.data, c.offset + RECORD), BLANK);
     assert_eq!(game.contract_count(), SQUAD + 1);
     // Roster count keeps the flag bits of its word.
     let count = u16::from_le_bytes(game.data[ml::TABLE_START + ml::COUNT_OFFSET..][..2].try_into().unwrap());
     assert_eq!(count, 0x8000 | (SQUAD as u16 + 1));
 }
 
-#[test]
-fn negotiated_player_completes_existing_row_in_place() {
-    let dir = TempDir::new("negotiated");
-    let mut game = open(&dir);
-    let (club, j) = NEGOTIATING;
-    let target = club_player(club, j);
-    game.transfer(incoming(club, target.player_id, 5_000_000, 3_000_000, date(2028, 8, 31))).unwrap();
-    let c = game.contract_of(&target).unwrap();
-    assert_eq!(c.offset, FIRST_ROW + SQUAD * RECORD);
-    assert_eq!((c.index, c.value_units, c.status, c.team), (31, 777_000, 5, team_ref(MANAGED)));
-    assert_eq!(c.start, Some(date(2025, 8, 6)));
+fn wordsn<const N: usize>(data: &[u8], off: usize) -> [u32; N] {
+    core::array::from_fn(|i| u32::from_le_bytes(data[off + 4 * i..off + 4 * i + 4].try_into().unwrap()))
+}
+
+fn agreed(source: usize, pid: u32) -> TransferRequest {
+    incoming(source, pid, 12_345_678, 2_500_049, date(2029, 8, 31))
 }
 
 #[test]
-fn unassigned_row_gets_an_index_when_signed() {
-    let dir = TempDir::new("unassigned");
+fn agreed_deal_waits_for_the_game_to_move_the_player() {
+    let dir = TempDir::new("agreed");
     let mut game = open(&dir);
-    let (club, j) = UNASSIGNED;
-    let target = club_player(club, j);
-    game.transfer(incoming(club, target.player_id, 0, 2_000_000, date(2027, 8, 31))).unwrap();
-    let c = game.contract_of(&target).unwrap();
-    assert_eq!((c.offset, c.index), (FIRST_ROW + (SQUAD + 1) * RECORD, 32));
+    let original = game.data.clone();
+    let wages = game.wage_bill_eur();
+    let target = club_player(7, 2);
+    game.transfer(agreed(7, target.player_id)).unwrap();
+
+    // The fee is paid now; the player stays at his club until the game moves him.
+    assert_eq!(game.finances().unwrap().transfer_eur, 50_000_000 - 12_345_700);
+    assert!(game.roster(Source::Club(7)).contains(&target));
+    assert!(!game.roster(Source::Club(MANAGED)).contains(&target));
+    assert_eq!((game.contract_count(), game.wage_bill_eur()), (SQUAD, wages));
+
+    // Offer ids and contract indexes share one numbering: the squad uses
+    // 0..SQUAD and the open negotiation SQUAD (offer) and SQUAD + 1 (contract).
+    let (offer_id, index) = (NEGOTIATION_INDEX + 1, NEGOTIATION_INDEX + 2);
+    let arrival = date(2025, 8, 7).pack();
+    let (iid, pid) = (target.internal_id, target.player_id);
+    assert_eq!(
+        words(&game.data, FIRST_ROW + (SQUAD + 1) * RECORD),
+        [index, team_ref(MANAGED), 4, arrival, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, iid, pid, 25_000, 123_457, date(2029, 8, 31).pack()]
+    );
+    let offers = FIRST_ROW + deals::OFFERS_OFFSET;
+    let (nc, nj) = NEGOTIATING;
+    assert_eq!(wordsn::<15>(&game.data, offers), negotiation_offer(club_player(nc, nj), nc));
+    assert_eq!(
+        wordsn::<15>(&game.data, offers + deals::OFFER_RECORD),
+        [offer_id, team_ref(MANAGED), 4, arrival, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, team_ref(7), iid, pid, 123_457, 123_457, 0xFFFF, 0xFFFF, 0]
+    );
+    let pair: Vec<u8> = [offer_id as u16, index as u16, 0xFFFF].iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(&game.data[FIRST_ROW + deals::AGREED_OFFSET..][..6], &pair[..]);
+    assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS), [iid, pid, 25_000]);
+    assert_eq!(wordsn::<13>(&game.data, deals::SEASON_DEALS), [iid, pid, 0, 0, 0, 0, 0, 0, (-123_457i32) as u32, 1, 0, 0, 0xFFFF]);
+
+    // A second deal takes the next free numbers and slots.
+    let second = club_player(8, 1);
+    game.transfer(agreed(8, second.player_id)).unwrap();
+    assert_eq!(wordsn::<15>(&game.data, offers + 2 * deals::OFFER_RECORD)[0], index + 1);
+    assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS + deals::PENDING_ENTRY)[1], second.player_id);
+    // Agreeing again on the same player is refused.
+    assert!(game.transfer(agreed(7, target.player_id)).is_err());
+
+    game.undo().unwrap();
+    game.undo().unwrap();
+    assert_eq!(game.data, original);
+}
+
+#[test]
+fn player_in_a_game_negotiation_is_refused() {
+    let dir = TempDir::new("negotiating");
+    let mut game = open(&dir);
+    let (nc, nj) = NEGOTIATING;
+    let before = game.data.clone();
+    assert!(game.transfer(agreed(nc, club_player(nc, nj).player_id)).is_err());
+    assert_eq!(game.data, before);
+}
+
+#[test]
+fn next_day_rolls_over_months_and_years() {
+    assert_eq!(date(2025, 8, 31).next_day(), date(2025, 9, 1));
+    assert_eq!(date(2025, 12, 31).next_day(), date(2026, 1, 1));
+    assert_eq!(date(2028, 2, 28).next_day(), date(2028, 2, 29));
 }
 
 #[test]
@@ -156,7 +214,7 @@ fn sale_removes_contract_compacts_table_and_credits_fee() {
         .unwrap();
     assert!(game.contract_of(&seller).is_none());
     assert_eq!(words(&game.data, FIRST_ROW + 2 * RECORD), next);
-    assert_eq!(words(&game.data, FIRST_ROW + (SQUAD + 1) * RECORD), BLANK);
+    assert_eq!(words(&game.data, FIRST_ROW + SQUAD * RECORD), BLANK);
     assert_eq!(game.contract_count(), SQUAD - 1);
     assert_eq!(game.finances().unwrap().transfer_eur, 53_000_000);
     assert_eq!(salary_budget(&game), 20_000_000);
@@ -253,7 +311,8 @@ fn unknown_finance_layout_fails_closed() {
     assert!(game.transfer(incoming(7, target.player_id, 1_000_000, 1_000_000, date(2029, 8, 31))).is_err());
     game.transfer(TransferRequest { use_transfer_budget: false, ..incoming(7, target.player_id, 1_000_000, 1_000_000, date(2029, 8, 31)) })
         .unwrap();
-    assert_eq!(game.contract_of(&target).unwrap().end, date(2029, 8, 31));
+    let row = game.contracts.as_ref().unwrap().find(&game.data, &target)[0];
+    assert_eq!((row.status, row.end), (4, date(2029, 8, 31)));
 }
 
 #[test]

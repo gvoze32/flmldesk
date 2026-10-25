@@ -3,6 +3,7 @@
 pub mod contracts;
 pub mod cpk;
 pub mod crypto;
+pub mod deals;
 pub mod masterleague;
 pub mod players;
 pub mod rating;

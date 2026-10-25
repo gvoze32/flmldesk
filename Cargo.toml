@@ -1,6 +1,6 @@
 [package]
 name = "fl-ml-desk"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Master League transfer & budget editor for Football Life 2026 / PES 2021 saves"
@@ -30,3 +30,6 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 unicode-normalization = "0.1.26"
 ureq = "3.5.0"
+
+[build-dependencies]
+embed-resource = "3.0.12"

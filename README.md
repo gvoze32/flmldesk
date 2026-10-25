@@ -7,7 +7,8 @@ What you can do:
 
 - **Sign players for your club.** You choose the transfer fee, the yearly
   salary and when the contract ends. The fee is taken from your transfer
-  budget and the player joins right away.
+  budget. The deal is agreed like in the game: the player shows in your
+  negotiations and the game moves him to your squad on the next in-game day.
 - **Sell players from your club.** Their contract ends and the fee goes into
   your transfer budget.
 - **Move players between other (AI) clubs.**
@@ -33,9 +34,14 @@ Go to the [Releases](../../releases) page and download
 4. **Game folder (names/OVR)…** (only once): choose the folder where the game is
    installed. This fills in the names, positions, ages and OVR of all players.
 5. **Player transfers** tab: search for a player, fill in **Transfer fee**,
-   **Salary per year** and **Contract until**, then press **Transfer →**.
+   **Salary per year** and **Contract until** (or click **+1 yr** to **+5 yr**
+   from the in-game date), then press **Transfer →** below.
    - You can type amounts like `12,500,000`, `12.5m` or `750k`.
    - If you pick one of your own players, the app switches to selling.
+   - A player you are already negotiating for in the game is refused: finish
+     or cancel that negotiation in the game first.
+   - Players without a club, and saves the app can't read the transfer lists
+     of, join your squad right away instead.
 6. **Budget & manager** tab: change the values and press **Apply**.
 7. Click **Save (with automatic backup)**. A copy of your old save is kept in
    the `FLMLDesk_backup` folder next to it, just in case.

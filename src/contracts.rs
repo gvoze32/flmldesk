@@ -1,21 +1,22 @@
 //! Contract table of the club the user manages.
 //!
 //! Layout decoded from real Football Life 2026 saves (before / deal agreed /
-//! after arrival of three signings). Each row is 48 bytes, twelve u32 words:
+//! after arrival, and one negotiation saved at every step). Each row is 48
+//! bytes, twelve u32 words:
 //!
 //! | word | meaning |
 //! |------|---------|
-//! | w0   | internal id (same as in the club roster pair) |
-//! | w1   | player id |
-//! | w2   | annual salary, units of 100 EUR |
-//! | w3   | player value at signing, units of 100 EUR (equals the fee for some signings) |
-//! | w4   | contract end, packed `year \| month << 16 \| day << 24` |
-//! | w5   | low 16 bits: row index (0xFFFF = not assigned yet); high bits unused |
-//! | w6   | club reference; low 14 bits = club index |
-//! | w7   | low byte: status. 5 = under contract, 4 = deal agreed (arrives on the start date), 1/3 = negotiation |
-//! | w8   | contract start date, or 0xFFFF |
-//! | w9, w10 | 0xFFFFFFFF |
-//! | w11  | low 16 bits 0xFFFF |
+//! | w0   | low 16 bits: row index (0xFFFF = not assigned); high bits unused |
+//! | w1   | club reference; low 14 bits = club index |
+//! | w2   | low byte: status. 5 = under contract, 4 = deal agreed (arrives on the start date), 1/3 = negotiation |
+//! | w3   | contract start date, or 0xFFFF |
+//! | w4, w5 | 0xFFFFFFFF |
+//! | w6   | low 16 bits 0xFFFF |
+//! | w7   | internal id (same as in the club roster pair) |
+//! | w8   | player id |
+//! | w9   | annual salary, units of 100 EUR |
+//! | w10  | player value at signing, units of 100 EUR (equals the fee for some signings) |
+//! | w11  | contract end, packed `year \| month << 16 \| day << 24` |
 //!
 //! Rows are contiguous; the first blank row ends the table. The game leaves
 //! stale bytes in the unused high halves, so only the documented bits are checked.
@@ -32,13 +33,26 @@ use crate::masterleague::Player;
 pub const RECORD: usize = 48;
 pub const SALARY_UNIT: u64 = 100;
 pub const STATUS_CONTRACTED: u8 = 5;
+pub const STATUS_AGREED: u8 = 4;
 const MAX_WALK: usize = 400;
 const MAX_TRAILING_BLANKS: usize = 12;
 const NO_INDEX: u32 = 0xFFFF;
 const TEAM_MASK: u32 = 0x3FFF;
 /// Blank row as written by the game.
 pub const BLANK: [u32; 12] =
-    [0xFFFF, 0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF_FFFF, 0, 0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF];
+    [0xFFFF, 0xFFFF_FFFF, 0, 0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, 0xFFFF, 0, 0, 0, 0xFFFF];
+const W_INDEX: usize = 0;
+const W_TEAM: usize = 1;
+const W_STATUS: usize = 2;
+const W_START: usize = 3;
+const W_TAIL: usize = 6;
+const W_INTERNAL: usize = 7;
+const W_PLAYER: usize = 8;
+const W_SALARY: usize = 9;
+const W_VALUE: usize = 10;
+const W_END: usize = 11;
+/// Offset of the (internal id, player id) pair inside a row.
+const ID_OFFSET: usize = 4 * W_INTERNAL;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Date {
@@ -66,6 +80,12 @@ impl Date {
 
     pub fn unpack(word: u32) -> Option<Date> {
         Date::new((word & 0xFFFF) as u16, ((word >> 16) & 0xFF) as u8, ((word >> 24) & 0xFF) as u8)
+    }
+
+    pub fn next_day(self) -> Date {
+        Date::new(self.year, self.month, self.day + 1)
+            .or_else(|| Date::new(self.year, self.month + 1, 1))
+            .unwrap_or(Date { year: self.year + 1, month: 1, day: 1 })
     }
 }
 
@@ -101,7 +121,7 @@ impl Contract {
 
 type Words = [u32; 12];
 
-fn words(data: &[u8], off: usize) -> Option<Words> {
+pub(crate) fn words(data: &[u8], off: usize) -> Option<Words> {
     let bytes = data.get(off..off.checked_add(RECORD)?)?;
     Some(core::array::from_fn(|i| u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())))
 }
@@ -110,27 +130,31 @@ fn words_before(data: &[u8], off: usize) -> Option<Words> {
     off.checked_sub(RECORD).and_then(|o| words(data, o))
 }
 
-fn encode(words: &Words) -> Vec<u8> {
+pub(crate) fn encode(words: &Words) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
 pub fn is_blank(t: Option<Words>) -> bool {
     t.is_some_and(|t| {
-        t[0] & 0xFFFF == 0xFFFF && t[1] == 0 && t[2] == 0 && t[5] & 0xFFFF == NO_INDEX && t[11] & 0xFFFF == 0xFFFF
+        t[W_INDEX] & 0xFFFF == NO_INDEX
+            && t[W_INTERNAL] & 0xFFFF == 0xFFFF
+            && t[W_PLAYER] == 0
+            && t[W_SALARY] == 0
+            && t[W_TAIL] & 0xFFFF == 0xFFFF
     })
 }
 
 pub fn is_record(t: Option<Words>) -> bool {
     let Some(t) = t else { return false };
-    let end_ok = Date::unpack(t[4]).is_some_and(|d| (2000..=2150).contains(&d.year));
-    let index = t[5] & 0xFFFF;
-    t[0] & 0xFFFF != 0xFFFF
-        && t[1] != 0
-        && 0 < t[2]
-        && t[2] < 10_000_000
+    let end_ok = Date::unpack(t[W_END]).is_some_and(|d| (2000..=2150).contains(&d.year));
+    let index = t[W_INDEX] & 0xFFFF;
+    t[W_INTERNAL] & 0xFFFF != 0xFFFF
+        && t[W_PLAYER] != 0
+        && 0 < t[W_SALARY]
+        && t[W_SALARY] < 10_000_000
         && end_ok
-        && t[11] & 0xFFFF == 0xFFFF
-        && ((1..=2000).contains(&index) || index == NO_INDEX)
+        && t[W_TAIL] & 0xFFFF == 0xFFFF
+        && (index <= 2000 || index == NO_INDEX)
 }
 
 fn contract_at(data: &[u8], off: usize) -> Option<Contract> {
@@ -139,15 +163,15 @@ fn contract_at(data: &[u8], off: usize) -> Option<Contract> {
         let t = t.unwrap();
         Contract {
             offset: off,
-            internal_id: t[0],
-            player_id: t[1],
-            salary_units: t[2],
-            value_units: t[3],
-            end: Date::unpack(t[4]).unwrap(),
-            index: t[5] & 0xFFFF,
-            team: t[6],
-            status: (t[7] & 0xFF) as u8,
-            start: Date::unpack(t[8]),
+            internal_id: t[W_INTERNAL],
+            player_id: t[W_PLAYER],
+            salary_units: t[W_SALARY],
+            value_units: t[W_VALUE],
+            end: Date::unpack(t[W_END]).unwrap(),
+            index: t[W_INDEX] & 0xFFFF,
+            team: t[W_TEAM],
+            status: (t[W_STATUS] & 0xFF) as u8,
+            start: Date::unpack(t[W_START]),
         }
     })
 }
@@ -156,7 +180,7 @@ fn contract_at(data: &[u8], off: usize) -> Option<Contract> {
 pub struct ContractTable {
     pub first: usize,
     pub slots: usize,
-    /// Club reference word (w6) of the managed club's contracts.
+    /// Club reference word (w1) of the managed club's contracts.
     pub team_ref: u32,
 }
 
@@ -170,7 +194,8 @@ impl ContractTable {
         for p in roster {
             let mut pattern = p.internal_id.to_le_bytes().to_vec();
             pattern.extend(p.player_id.to_le_bytes());
-            for off in memchr::memmem::find_iter(data, &pattern) {
+            for id_off in memchr::memmem::find_iter(data, &pattern) {
+                let Some(off) = id_off.checked_sub(ID_OFFSET) else { continue };
                 if contract_at(data, off).is_some_and(|c| c.club_index() == club) {
                     groups.entry(off % RECORD).or_default().push((off, *p));
                 }
@@ -228,7 +253,7 @@ impl ContractTable {
         }
         let mut refs: HashMap<u32, usize> = HashMap::new();
         for (off, _) in anchors {
-            *refs.entry(words(data, *off).unwrap()[6]).or_default() += 1;
+            *refs.entry(words(data, *off).unwrap()[W_TEAM]).or_default() += 1;
         }
         let team_ref = refs.into_iter().max_by_key(|(r, n)| (*n, std::cmp::Reverse(*r))).unwrap().0;
         let table = ContractTable { first, slots, team_ref };
@@ -286,11 +311,8 @@ impl ContractTable {
         Ok((row.offset, bytes, row))
     }
 
-    /// Patch (offset, bytes) that puts the player under contract with the managed club.
-    ///
-    /// An existing row for the player (shortlist, negotiation, agreed deal) is
-    /// completed in place, as the game does when a deal goes through; otherwise
-    /// a new row is appended after the last one.
+    /// Patch (offset, bytes) appending a row that puts the player under
+    /// contract with the managed club from `start`.
     pub fn signing(
         &self,
         data: &[u8],
@@ -300,49 +322,77 @@ impl ContractTable {
         end: Date,
         start: Date,
     ) -> Result<(usize, Vec<u8>), Error> {
-        if !(1..10_000_000).contains(&salary_units) {
-            return Err(Error::new("Salary must be between €100 and €999,999,900 per year."));
-        }
-        if !(2000..=2150).contains(&end.year) || end <= start {
-            return Err(Error::new("The contract must end after the in-game date and before 2150."));
-        }
+        let next_index = self.rows(data).iter().map(|c| c.index).filter(|i| *i != NO_INDEX).max().map_or(0, |i| i + 1);
+        self.new_row(data, player, next_index, STATUS_CONTRACTED, start, salary_units, value_units, end)
+    }
+
+    /// Patch (offset, bytes) appending a "deal agreed" row (status 4): the
+    /// player joins the managed club on `arrival`, as after a deal agreed in
+    /// the game.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agreed(
+        &self,
+        data: &[u8],
+        player: &Player,
+        index: u32,
+        salary_units: u32,
+        value_units: u32,
+        end: Date,
+        arrival: Date,
+    ) -> Result<(usize, Vec<u8>), Error> {
+        self.new_row(data, player, index, STATUS_AGREED, arrival, salary_units, value_units, end)
+    }
+
+    /// New row after the last one. Players the game already lists in this
+    /// table (negotiation, agreed deal, contract) are refused: completing the
+    /// game's own negotiation would leave its offers and lists behind.
+    #[allow(clippy::too_many_arguments)]
+    fn new_row(
+        &self,
+        data: &[u8],
+        player: &Player,
+        index: u32,
+        status: u8,
+        start: Date,
+        salary_units: u32,
+        value_units: u32,
+        end: Date,
+    ) -> Result<(usize, Vec<u8>), Error> {
+        check_terms(salary_units, end, start)?;
         let rows = self.rows(data);
-        let next_index = rows.iter().map(|c| c.index).filter(|i| *i != NO_INDEX).max().unwrap_or(0) + 1;
-        let existing: Vec<&Contract> =
-            rows.iter().filter(|c| c.internal_id == player.internal_id && c.player_id == player.player_id).collect();
-        let (offset, mut w) = match existing.as_slice() {
-            [] => {
-                let offset = self.first + rows.len() * RECORD;
-                if offset >= self.first + self.slots * RECORD || !is_blank(words(data, offset)) {
-                    return Err(Error::new("The contract list is full; sell or release a player first."));
-                }
-                let mut w = BLANK;
-                w[3] = value_units;
-                w[5] = next_index;
-                (offset, w)
-            }
-            [row] => {
-                if row.status == STATUS_CONTRACTED && row.team == self.team_ref {
-                    return Err(Error::new(format!("Player ID {} already has a contract at your club.", player.player_id)));
-                }
-                let mut w = words(data, row.offset).unwrap();
-                if w[5] & 0xFFFF == NO_INDEX {
-                    w[5] = (w[5] & !0xFFFF) | next_index;
-                }
-                (row.offset, w)
-            }
-            _ => return Err(Error::new(format!("Player ID {} has more than one contract; cancelled.", player.player_id))),
-        };
-        w[0] = player.internal_id;
-        w[1] = player.player_id;
-        w[2] = salary_units;
-        w[4] = end.pack();
-        w[6] = self.team_ref;
-        w[7] = (w[7] & !0xFF) | STATUS_CONTRACTED as u32;
-        w[8] = start.pack();
+        if rows.iter().any(|c| c.internal_id == player.internal_id && c.player_id == player.player_id) {
+            return Err(Error::new(format!(
+                "Player ID {} is already in a negotiation or under contract in the game; finish or cancel that there first.",
+                player.player_id
+            )));
+        }
+        let offset = self.first + rows.len() * RECORD;
+        if offset >= self.first + self.slots * RECORD || !is_blank(words(data, offset)) {
+            return Err(Error::new("The contract list is full; sell or release a player first."));
+        }
+        let mut w = BLANK;
+        w[W_INDEX] = index;
+        w[W_TEAM] = self.team_ref;
+        w[W_STATUS] = status as u32;
+        w[W_START] = start.pack();
+        w[W_INTERNAL] = player.internal_id;
+        w[W_PLAYER] = player.player_id;
+        w[W_SALARY] = salary_units;
+        w[W_VALUE] = value_units;
+        w[W_END] = end.pack();
         if !is_record(Some(w)) {
             return Err(Error::new("The new contract didn't pass the safety check."));
         }
         Ok((offset, encode(&w)))
     }
+}
+
+fn check_terms(salary_units: u32, end: Date, start: Date) -> Result<(), Error> {
+    if !(1..10_000_000).contains(&salary_units) {
+        return Err(Error::new("Salary must be between €100 and €999,999,900 per year."));
+    }
+    if !(2000..=2150).contains(&end.year) || end <= start {
+        return Err(Error::new("The contract must end after the in-game date and before 2150."));
+    }
+    Ok(())
 }

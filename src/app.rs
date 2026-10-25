@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText, vec2};
 use egui_extras::{Column, TableBuilder};
 use fl_ml_desk::masterleague::{MasterLeague, Player, Source, TransferRequest, fmt_int};
 use fl_ml_desk::contracts::Date;
@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
+use crate::theme::{self, Tone};
+
 const BUNDLED_NAMES: &str = include_str!("../data/FL2622wc_players.txt");
 const SETTINGS_FILE: &str = ".fl-ml-desk.json";
 /// Display currencies use the game's own conversion factors (EUR is the stored base).
 const CURRENCIES: [(&str, f64); 5] = [("EUR €", 1.0), ("GBP £", 0.9), ("CHF", 1.1), ("BRL R$", 4.3), ("JPY ¥", 125.0)];
-const INFO: Color32 = Color32::from_rgb(0x4A, 0x8F, 0xE0);
-const WARN: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x4A);
 
 fn normal(text: &str) -> String {
     text.nfkd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase()
@@ -194,6 +194,7 @@ pub struct App {
     manager: String,
     // updates
     update: Option<update::Release>,
+    logo: egui::TextureHandle,
 }
 
 impl App {
@@ -238,6 +239,7 @@ impl App {
             sb: String::new(),
             manager: String::new(),
             update: None,
+            logo: logo_texture(&cc.egui_ctx),
         };
         if let Some(folder) = app.settings.game_folder.clone().filter(|f| Path::new(f).is_dir()) {
             app.load_game_folder(&cc.egui_ctx, PathBuf::from(folder));
@@ -396,7 +398,7 @@ impl App {
             Ok(_) => {
                 self.settings.clubs.insert(game.path.to_string_lossy().into_owned(), index);
                 self.settings.store();
-                let end = game.default_contract_end();
+                let end = game.contract_end_in(3);
                 (self.end_year, self.end_month, self.end_day) = (end.year, end.month, end.day);
                 self.dest = Some(index);
                 self.club_info.clear();
@@ -536,7 +538,14 @@ impl App {
                 let left = f.salary_eur - wages;
                 lines.push(format!("Salary budget left (in game): {} → {}", self.to_display(left), self.to_display(left - wage)));
             }
-            lines.push("The contract starts right away, as if the deal were already done. Check it in the game.".into());
+            let from_club = matches!(self.selected, Some((Source::Club(_), _)));
+            if from_club && let Some(day) = game.game_date.map(|d| d.next_day()) {
+                lines.push(format!(
+                    "Deal agreed now: the fee is paid today and the player joins on {day}, when the game moves him. Until then he shows in your negotiations."
+                ));
+            } else {
+                lines.push("The player joins your squad right away. Check it in the game.".into());
+            }
         } else {
             let contract = self.selected.and_then(|(_, p)| game.contract_of(&p));
             match contract {
@@ -619,114 +628,148 @@ impl App {
     }
 
     // --- layout ---------------------------------------------------------------------
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    fn header(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(self.busy == 0, |ui| {
-                if ui.button("📂 Open ML save…").clicked() {
-                    self.open_save(&ctx);
-                }
+            ui.add(egui::Image::from_texture(egui::load::SizedTexture::from_handle(&self.logo)).fit_to_exact_size(vec2(44.0, 44.0)));
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.label(RichText::new("FL ML Desk").heading().strong().color(theme::accent(ui)));
+                ui.label(RichText::new("Master League transfers & budget · Football Life 2026 / PES 2021").color(theme::muted(ui)));
             });
-            if ui.button("Game folder (names/OVR)…").clicked()
-                && let Some(folder) = FileDialog::new().set_title("Choose the game folder (the one with the download folder)").pick_folder()
-            {
-                self.settings.game_folder = Some(folder.to_string_lossy().into_owned());
-                self.settings.store();
-                self.load_game_folder(&ctx, folder);
-            }
-            if ui.button("Import names / EDIT…").clicked()
-                && let Some(path) = FileDialog::new().set_title("Name list (TXT/CSV) or EDIT00000000").pick_file()
-            {
-                self.spawn(&ctx, move || {
-                    let mut catalog = PlayerCatalog::default();
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    let result = if name.to_uppercase().starts_with("EDIT") {
-                        catalog.load_edit(&path)
-                    } else {
-                        catalog.load_name_list(&path)
-                    };
-                    Job::Names(result.map(|n| (catalog, n, name)))
-                });
-            }
-            ui.separator();
-            ui.label("Currency:");
-            let before = self.currency;
-            egui::ComboBox::from_id_salt("currency")
-                .selected_text(CURRENCIES[self.currency].0)
-                .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
-            if before != self.currency {
-                self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
-                self.settings.store();
-                self.fill_finances();
-                self.results_dirty = true;
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Check for updates").clicked() {
                     self.check_updates(&ctx, true);
                 }
-                ui.weak(format!("v{}", update::CURRENT_VERSION));
+                ui.label(RichText::new(format!("v{}", update::CURRENT_VERSION)).small().color(theme::muted(ui)));
                 if self.busy > 0 {
                     ui.spinner();
                 }
             });
         });
         if let Some(release) = self.update.clone() {
-            egui::Frame::group(ui.style()).fill(ui.visuals().extreme_bg_color).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("New version {} available (you have v{}).", release.tag, update::CURRENT_VERSION)).color(INFO).strong());
-                    if let Some(url) = &release.asset_url
-                        && ui.button("⬇ Download").clicked()
-                    {
-                        ctx.open_url(egui::OpenUrl::new_tab(url));
-                    }
-                    if ui.button("What's new").clicked() {
-                        ctx.open_url(egui::OpenUrl::new_tab(&release.page_url));
-                    }
-                    if ui.small_button("Close").clicked() {
-                        self.update = None;
-                    }
-                });
-            });
-        }
-        match &self.game {
-            Some(g) => ui.weak(format!("{}   ·   {}   ·   {} clubs", g.path.display(), g.game, g.teams.len())),
-            None => ui.weak("No save opened yet"),
-        };
-        ui.weak(format!(
-            "Player names: {} from {}",
-            fmt_int(self.catalog.players.len() as i64),
-            if self.catalog.sources.is_empty() { "none yet".into() } else { self.catalog.sources.join(", ") }
-        ));
-        if self.game.is_some() {
-            ui.horizontal(|ui| {
-                ui.strong("Your club:");
-                let mine = self.game.as_ref().unwrap().managed_team;
-                let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
-                let items = self.club_items.clone();
-                if let Some(index) = search_combo(ui, "my_club", 360.0, &text, &mut self.my_club_filter, &items) {
-                    self.set_managed_club(index);
+            ui.add_space(4.0);
+            theme::callout(ui, Tone::Info, |ui| {
+                ui.label(RichText::new(format!("New version {} available (you have v{}).", release.tag, update::CURRENT_VERSION)).strong());
+                if let Some(url) = &release.asset_url
+                    && ui.button("Download").clicked()
+                {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
-                if let Some(i) = self.game.as_ref().unwrap().managed_team {
-                    let g = self.game.as_ref().unwrap();
-                    ui.weak(format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count()));
+                if ui.button("What's new").clicked() {
+                    ctx.open_url(egui::OpenUrl::new_tab(&release.page_url));
                 }
-                ui.weak(&self.club_info);
+                if ui.small_button("Close").clicked() {
+                    self.update = None;
+                }
             });
         }
     }
 
-    fn bottom_bar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.strong("Unsaved changes:");
-        egui::ScrollArea::vertical().max_height(90.0).id_salt("ops").show(ui, |ui| {
-            if let Some(g) = &self.game {
-                for op in g.operations() {
-                    ui.label(op);
+    fn save_card(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        theme::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(self.busy == 0, |ui| {
+                    let open = if self.game.is_none() {
+                        theme::primary_button(ui, "Open ML save…")
+                    } else {
+                        egui::Button::new("Open another save…")
+                    };
+                    if ui.add(open).clicked() {
+                        self.open_save(&ctx);
+                    }
+                });
+                if ui.button("Game folder (names/OVR)…").clicked()
+                    && let Some(folder) = FileDialog::new().set_title("Choose the game folder (the one with the download folder)").pick_folder()
+                {
+                    self.settings.game_folder = Some(folder.to_string_lossy().into_owned());
+                    self.settings.store();
+                    self.load_game_folder(&ctx, folder);
+                }
+                if ui.button("Import names / EDIT…").clicked()
+                    && let Some(path) = FileDialog::new().set_title("Name list (TXT/CSV) or EDIT00000000").pick_file()
+                {
+                    self.spawn(&ctx, move || {
+                        let mut catalog = PlayerCatalog::default();
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        let result = if name.to_uppercase().starts_with("EDIT") {
+                            catalog.load_edit(&path)
+                        } else {
+                            catalog.load_name_list(&path)
+                        };
+                        Job::Names(result.map(|n| (catalog, n, name)))
+                    });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let before = self.currency;
+                    egui::ComboBox::from_id_salt("currency")
+                        .selected_text(CURRENCIES[self.currency].0)
+                        .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
+                    ui.label("Currency:");
+                    if before != self.currency {
+                        self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
+                        self.settings.store();
+                        self.fill_finances();
+                        self.results_dirty = true;
+                    }
+                });
+            });
+            let muted = theme::muted(ui);
+            let names = format!(
+                "Player names: {} from {}",
+                fmt_int(self.catalog.players.len() as i64),
+                if self.catalog.sources.is_empty() { "none yet".into() } else { self.catalog.sources.join(", ") }
+            );
+            ui.horizontal(|ui| {
+                match &self.game {
+                    Some(g) => theme::chip(ui, Tone::Ok, format!("{}   ·   {}   ·   {} clubs", g.path.display(), g.game, g.teams.len())),
+                    None => {
+                        ui.label(RichText::new("No save opened yet. You can also drop the file on this window.").color(muted));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(names).small().color(muted));
+                });
+            });
+            if self.game.is_some() {
+                ui.horizontal(|ui| {
+                    ui.strong("Your club:");
+                    let mine = self.game.as_ref().unwrap().managed_team;
+                    let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
+                    let items = self.club_items.clone();
+                    if let Some(index) = search_combo(ui, "my_club", 360.0, &text, &mut self.my_club_filter, &items) {
+                        self.set_managed_club(index);
+                    }
+                    if let Some(i) = self.game.as_ref().unwrap().managed_team {
+                        let g = self.game.as_ref().unwrap();
+                        ui.label(
+                            RichText::new(format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count()))
+                                .color(muted),
+                        );
+                    }
+                    ui.label(RichText::new(&self.club_info).color(muted));
+                });
+            }
+        });
+    }
+
+    fn tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (tab, title) in [(Tab::Transfer, "Player transfers"), (Tab::Budget, "Budget & manager")] {
+                let text = RichText::new(title).strong().size(15.0);
+                if ui.add(egui::Button::selectable(self.tab == tab, text).min_size(vec2(150.0, 32.0))).clicked() {
+                    self.tab = tab;
                 }
             }
         });
+    }
+
+    fn bottom_bar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
         let pending = self.game.as_ref().is_some_and(|g| !g.history.is_empty());
         ui.horizontal(|ui| {
+            theme::section_title(ui, "Unsaved changes");
             if ui.add_enabled(pending, egui::Button::new("↶ Undo last change")).clicked() {
                 let game = self.game.as_mut().unwrap();
                 match game.undo() {
@@ -744,7 +787,7 @@ impl App {
                 {
                     self.save(Some(path));
                 }
-                if ui.add_enabled(pending, egui::Button::new("💾 Save (with automatic backup)")).clicked() {
+                if ui.add_enabled(pending, theme::primary_button(ui, "Save (with automatic backup)")).clicked() {
                     let name = self.game.as_ref().unwrap().path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                     if confirm(
                         "Save",
@@ -758,7 +801,15 @@ impl App {
                 }
             });
         });
-        ui.label(&self.status);
+        egui::ScrollArea::vertical().max_height(70.0).id_salt("ops").show(ui, |ui| {
+            if let Some(g) = &self.game {
+                for op in g.operations() {
+                    ui.label(op);
+                }
+            }
+        });
+        ui.label(RichText::new(&self.status).color(theme::muted(ui)));
+        ui.add_space(2.0);
     }
 
     fn transfer_tab(&mut self, ui: &mut egui::Ui) {
@@ -789,7 +840,9 @@ impl App {
         ui.add_space(4.0);
 
         // Detail form sits at the bottom; the table takes the remaining height.
-        egui::Panel::bottom("transfer_form").show(ui, |ui| self.transfer_form(ui));
+        egui::Panel::bottom("transfer_form").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6))).show(ui, |ui| {
+            theme::card(ui, |ui| self.transfer_form(ui))
+        });
         egui::CentralPanel::default().show(ui, |ui| self.results_table(ui));
     }
 
@@ -850,24 +903,21 @@ impl App {
     }
 
     fn transfer_form(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
         let game = self.game.as_ref().unwrap();
-        match self.selected {
+        let player = match self.selected {
             Some((source, player)) => {
                 let info = self.catalog.get(player.player_id);
-                ui.strong(format!(
+                format!(
                     "{} · {} · age {} · OVR {} · {}",
                     info.name,
                     info.position.unwrap_or("-"),
                     info.age.map_or("-".into(), |a| a.to_string()),
                     info.overall.map_or("-".into(), |o| o.to_string()),
                     game.source_name(source)
-                ));
+                )
             }
-            None => {
-                ui.strong("Select a player in the table.");
-            }
-        }
+            None => "Select a player in the table.".into(),
+        };
         let mine = game.managed_team;
         let mut dest_items: Vec<(String, usize)> = Vec::new();
         if let Some(m) = mine {
@@ -875,44 +925,53 @@ impl App {
         }
         dest_items.extend(self.club_items.iter().cloned());
         let mode = self.mode();
-        egui::Grid::new("form").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
+        let ends: Vec<Date> = (1..=5).map(|n| game.contract_end_in(n)).collect();
+        ui.horizontal(|ui| {
+            theme::section_title(ui, "Transfer");
+            ui.strong(player);
+        });
+        ui.horizontal_wrapped(|ui| {
             ui.label("To club:");
             let text = self.dest.and_then(|d| dest_items.iter().find(|(_, i)| *i == d)).map(|(l, _)| l.clone()).unwrap_or_default();
             if let Some(d) = search_combo(ui, "dest", 360.0, &text, &mut self.dest_filter, &dest_items) {
                 self.dest = Some(d);
             }
-            ui.label("");
-            ui.label("");
-            ui.label("");
-            let can = self.busy == 0 && mode.is_some();
-            if ui.add_enabled(can, egui::Button::new(RichText::new("Transfer →").strong())).clicked() {
-                self.do_transfer();
-            }
-            ui.end_row();
-
-            let money = matches!(mode, Some(Mode::In | Mode::Out));
-            let incoming = mode == Some(Mode::In);
-            ui.label(if mode == Some(Mode::Out) { "Fee received:" } else { "Transfer fee:" });
-            ui.add_enabled_ui(money, |ui| ui.add_sized([150.0, 22.0], egui::TextEdit::singleline(&mut self.fee)));
-            ui.label("Salary per year:");
-            ui.add_enabled_ui(incoming, |ui| ui.add_sized([150.0, 22.0], egui::TextEdit::singleline(&mut self.salary)));
-            ui.label("Contract until (year/month/day):");
-            ui.add_enabled_ui(incoming, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.end_year).range(2000..=2150));
-                    ui.add(egui::DragValue::new(&mut self.end_month).range(1..=12));
-                    ui.add(egui::DragValue::new(&mut self.end_day).range(1..=31));
-                });
-            });
-            ui.end_row();
-
-            ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
-            ui.end_row();
         });
+        let money = matches!(mode, Some(Mode::In | Mode::Out));
+        let incoming = mode == Some(Mode::In);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(if mode == Some(Mode::Out) { "Fee received:" } else { "Transfer fee:" });
+            ui.add_enabled_ui(money, |ui| ui.add(egui::TextEdit::singleline(&mut self.fee).desired_width(130.0)));
+            ui.add_space(8.0);
+            ui.label("Salary per year:");
+            ui.add_enabled_ui(incoming, |ui| ui.add(egui::TextEdit::singleline(&mut self.salary).desired_width(130.0)));
+            ui.add_space(8.0);
+            ui.label("Contract until:");
+            ui.add_enabled_ui(incoming, |ui| {
+                ui.add(egui::DragValue::new(&mut self.end_year).range(2000..=2150)).on_hover_text("Year");
+                ui.add(egui::DragValue::new(&mut self.end_month).range(1..=12)).on_hover_text("Month");
+                ui.add(egui::DragValue::new(&mut self.end_day).range(1..=31)).on_hover_text("Day");
+                for (n, end) in ends.iter().enumerate() {
+                    let current = (self.end_year, self.end_month, self.end_day) == (end.year, end.month, end.day);
+                    if ui.selectable_label(current, format!("+{} yr", n + 1)).on_hover_text(end.to_string()).clicked() {
+                        (self.end_year, self.end_month, self.end_day) = (end.year, end.month, end.day);
+                    }
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can = self.busy == 0 && mode.is_some();
+                if ui.add_enabled(can, theme::primary_button(ui, "Transfer →")).clicked() {
+                    self.do_transfer();
+                }
+            });
+        });
+        let info = theme::tone_color(ui, Tone::Info);
         for line in self.preview(mode) {
-            ui.label(RichText::new(line).color(INFO));
+            ui.label(RichText::new(line).color(info));
         }
-        ui.add_space(6.0);
     }
 
     fn budget_tab(&mut self, ui: &mut egui::Ui) {
@@ -921,7 +980,10 @@ impl App {
             return;
         };
         if let Some(e) = &game.finance_error {
-            ui.label(RichText::new(format!("The budget can't be edited: {e}")).color(WARN));
+            let message = format!("The budget can't be edited: {e}");
+            theme::callout(ui, Tone::Warn, |ui| {
+                ui.label(message);
+            });
             return;
         }
         let saved = game.finances().ok();
@@ -934,52 +996,71 @@ impl App {
                 *field = fmt_int(v + (eur as f64 * rate).round_ties_even() as i64);
             }
         };
-        egui::Grid::new("budget").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label(format!("Transfer budget ({symbol}):"));
-            ui.add(egui::TextEdit::singleline(&mut self.tb).desired_width(220.0));
-            ui.horizontal(|ui| {
-                for m in [10, 50, 100] {
-                    if ui.button(format!("+€{m}m")).clicked() {
-                        bump(&mut self.tb, m * 1_000_000);
+        ui.add_space(4.0);
+        let muted = theme::muted(ui);
+        theme::card(ui, |ui| {
+            theme::section_title(ui, "Budget & manager");
+            egui::Grid::new("budget").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label(format!("Transfer budget ({symbol}):"));
+                ui.add(egui::TextEdit::singleline(&mut self.tb).desired_width(220.0));
+                ui.horizontal(|ui| {
+                    for m in [10, 50, 100] {
+                        if ui.button(format!("+€{m}m")).clicked() {
+                            bump(&mut self.tb, m * 1_000_000);
+                        }
                     }
-                }
-            });
-            ui.end_row();
-            ui.label(format!("Yearly salary budget ({symbol}):"));
-            ui.add(egui::TextEdit::singleline(&mut self.sb).desired_width(220.0));
-            ui.horizontal(|ui| {
-                for m in [5, 20] {
-                    if ui.button(format!("+€{m}m")).clicked() {
-                        bump(&mut self.sb, m * 1_000_000);
+                });
+                ui.end_row();
+                ui.label(format!("Yearly salary budget ({symbol}):"));
+                ui.add(egui::TextEdit::singleline(&mut self.sb).desired_width(220.0));
+                ui.horizontal(|ui| {
+                    for m in [5, 20] {
+                        if ui.button(format!("+€{m}m")).clicked() {
+                            bump(&mut self.sb, m * 1_000_000);
+                        }
                     }
-                }
+                });
+                ui.end_row();
+                ui.label("Manager name:");
+                ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
+                ui.end_row();
             });
-            ui.end_row();
-            ui.label("Manager name:");
-            ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
-            ui.end_row();
-        });
-        ui.add_space(8.0);
-        if ui.add_enabled(self.busy == 0, egui::Button::new("Apply")).clicked() {
-            self.apply_finances();
-        }
-        ui.add_space(8.0);
-        ui.weak("You can type amounts like 12,500,000, 12.5m or 750k. They are saved in steps of €100, like in the game.");
-        if let Some(f) = saved {
-            ui.weak(format!(
-                "In the save now: transfer {} · yearly salary budget {}",
-                self.to_display(f.transfer_eur),
-                self.to_display(f.salary_eur)
-            ));
-            if has_club {
-                ui.weak(format!(
-                    "Your club's total salaries {} → salary budget left in the game ≈ {}",
-                    self.to_display(wages),
-                    self.to_display(f.salary_eur - wages)
-                ));
+            ui.add_space(8.0);
+            if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply")).clicked() {
+                self.apply_finances();
             }
-        }
+            ui.add_space(8.0);
+            ui.label(RichText::new("You can type amounts like 12,500,000, 12.5m or 750k. They are saved in steps of €100, like in the game.").color(muted));
+            if let Some(f) = saved {
+                ui.label(
+                    RichText::new(format!(
+                        "In the save now: transfer {} · yearly salary budget {}",
+                        self.to_display(f.transfer_eur),
+                        self.to_display(f.salary_eur)
+                    ))
+                    .color(muted),
+                );
+                if has_club {
+                    theme::chip(
+                        ui,
+                        Tone::Info,
+                        format!(
+                            "Your club's total salaries {} → salary budget left in the game ≈ {}",
+                            self.to_display(wages),
+                            self.to_display(f.salary_eur - wages)
+                        ),
+                    );
+                }
+            }
+        });
     }
+}
+
+/// The window icon, shown again in the header.
+fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG).expect("bundled icon is a valid PNG");
+    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    ctx.load_texture("logo", image, egui::TextureOptions::LINEAR)
 }
 
 impl eframe::App for App {
@@ -995,18 +1076,15 @@ impl eframe::App for App {
         if self.results_dirty {
             self.refresh_results();
         }
-        egui::Panel::top("top").show(ui, |ui| {
+        egui::Panel::top("top").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| {
+            self.header(ui);
             ui.add_space(6.0);
-            self.top_bar(ui);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Transfer, RichText::new("Player transfers").strong());
-                ui.selectable_value(&mut self.tab, Tab::Budget, RichText::new("Budget & manager").strong());
-            });
-            ui.add_space(2.0);
+            self.save_card(ui);
+            ui.add_space(6.0);
+            self.tabs(ui);
         });
-        egui::Panel::bottom("bottom").show(ui, |ui| self.bottom_bar(ui));
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
+        egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 6))).show(ui, |ui| self.bottom_bar(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 4))).show(ui, |ui| match self.tab {
             Tab::Transfer => self.transfer_tab(ui),
             Tab::Budget => self.budget_tab(ui),
         });
