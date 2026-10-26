@@ -403,6 +403,8 @@ impl App {
                 self.dest = Some(index);
                 self.club_info.clear();
                 self.results_dirty = true;
+                // The game shows the salary budget minus this club's salaries.
+                self.fill_finances();
             }
             Err(e) => error_dialog("Can't use this club", &e.to_string()),
         }
@@ -432,12 +434,14 @@ impl App {
         self.results_dirty = true;
     }
 
+    /// Fills the budget fields with the values the game shows. The game shows
+    /// the stored yearly salary budget minus the club's salaries.
     fn fill_finances(&mut self) {
         let Some(game) = &self.game else { return };
         match game.finances() {
             Ok(f) => {
                 self.tb = self.to_display(f.transfer_eur);
-                self.sb = self.to_display(f.salary_eur);
+                self.sb = self.to_display(f.salary_eur - game.wage_bill_eur());
                 self.manager = f.manager_name;
             }
             Err(_) => {
@@ -534,9 +538,12 @@ impl App {
             if let (true, Some(f)) = (self.use_tb, &fin) {
                 lines.push(format!("Transfer budget: {} → {}", self.to_display(f.transfer_eur), self.to_display(f.transfer_eur - fee)));
             }
-            if let (Some(f), Ok(wage)) = (&fin, self.from_display(&self.salary)) {
+            if let Some(f) = &fin {
                 let left = f.salary_eur - wages;
-                lines.push(format!("Salary budget left (in game): {} → {}", self.to_display(left), self.to_display(left - wage)));
+                lines.push(match self.from_display(&self.salary) {
+                    Ok(wage) => format!("Salary budget left (in game): {} → {}", self.to_display(left), self.to_display(left - wage)),
+                    Err(()) => format!("Salary budget left (in game): {}", self.to_display(left)),
+                });
             }
             if let Some(day) = game.game_date.map(|d| d.next_day()) {
                 lines.push(format!(
@@ -599,12 +606,14 @@ impl App {
 
     fn apply_finances(&mut self) {
         let parsed = (|| -> Result<(i64, i64), ()> { Ok((self.from_display(&self.tb)?, self.from_display(&self.sb)?)) })();
-        let Ok((tb, sb)) = parsed else {
+        let Ok((tb, sb_left)) = parsed else {
             error_dialog("Invalid amount", "Check the budget amounts again.");
             return;
         };
         let manager = self.manager.clone();
         let game = self.game.as_mut().unwrap();
+        // The field holds what the game shows; the save stores it plus the salaries.
+        let sb = sb_left + game.wage_bill_eur();
         match game.set_finances(tb, sb, &manager) {
             Ok(op) => {
                 self.status = op.description.clone();
@@ -656,7 +665,9 @@ impl App {
     fn save_card(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         theme::card(ui, |ui| {
-            ui.horizontal(|ui| {
+            // Wrapped rows: on a narrow window or with Windows scaling the items
+            // move to the next line instead of drawing over each other.
+            ui.horizontal_wrapped(|ui| {
                 ui.add_enabled_ui(self.busy == 0, |ui| {
                     let open = if self.game.is_none() {
                         theme::primary_button(ui, "Open ML save…")
@@ -688,39 +699,49 @@ impl App {
                         Job::Names(result.map(|n| (catalog, n, name)))
                     });
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let before = self.currency;
-                    egui::ComboBox::from_id_salt("currency")
-                        .selected_text(CURRENCIES[self.currency].0)
-                        .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
-                    ui.label("Currency:");
-                    if before != self.currency {
-                        self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
-                        self.settings.store();
-                        self.fill_finances();
-                        self.results_dirty = true;
-                    }
-                });
+                ui.add_space(12.0);
+                ui.label("Currency:");
+                let before = self.currency;
+                egui::ComboBox::from_id_salt("currency")
+                    .selected_text(CURRENCIES[self.currency].0)
+                    .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
+                if before != self.currency {
+                    self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
+                    self.settings.store();
+                    self.fill_finances();
+                    self.results_dirty = true;
+                }
             });
             let muted = theme::muted(ui);
-            let names = format!(
-                "Player names: {} from {}",
-                fmt_int(self.catalog.players.len() as i64),
-                if self.catalog.sources.is_empty() { "none yet".into() } else { self.catalog.sources.join(", ") }
-            );
-            ui.horizontal(|ui| {
+            // One source per game file (data_*.cpk …): show the count, list them in the tooltip.
+            let sources = &self.catalog.sources;
+            let names = match sources.len() {
+                0 => format!("Player names: {} (built-in list not loaded)", fmt_int(self.catalog.players.len() as i64)),
+                1 => format!("Player names: {} from {}", fmt_int(self.catalog.players.len() as i64), sources[0]),
+                n => format!("Player names: {} from {n} files", fmt_int(self.catalog.players.len() as i64)),
+            };
+            let names_tip = sources.join("\n");
+            // The file name only; the full path (long on Windows) is in the tooltip.
+            let row = ui.horizontal_wrapped(|ui| {
                 match &self.game {
-                    Some(g) => theme::chip(ui, Tone::Ok, format!("{}   ·   {}   ·   {} clubs", g.path.display(), g.game, g.teams.len())),
+                    Some(g) => {
+                        let file = g.path.file_name().unwrap_or_default().to_string_lossy();
+                        theme::chip(ui, Tone::Ok, format!("{file}  ·  {}  ·  {} clubs", g.game, g.teams.len()));
+                    }
                     None => {
                         ui.label(RichText::new("No save opened yet. You can also drop the file on this window.").color(muted));
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(names).small().color(muted));
-                });
+                let label = ui.label(RichText::new(names).small().color(muted));
+                if !names_tip.is_empty() {
+                    label.on_hover_text(names_tip);
+                }
             });
+            if let Some(g) = &self.game {
+                row.response.on_hover_text(g.path.display().to_string());
+            }
             if self.game.is_some() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.strong("Your club:");
                     let mine = self.game.as_ref().unwrap().managed_team;
                     let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
@@ -766,7 +787,7 @@ impl App {
                 self.after_change();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(pending, egui::Button::new("Save as…")).clicked()
+                if ui.add_enabled(pending, theme::secondary_button("Save as…")).clicked()
                     && let Some(path) = FileDialog::new()
                         .set_title("Save as")
                         .set_file_name(self.game.as_ref().unwrap().path.file_name().unwrap_or_default().to_string_lossy())
@@ -998,7 +1019,7 @@ impl App {
                     }
                 });
                 ui.end_row();
-                ui.label(format!("Yearly salary budget ({symbol}):"));
+                ui.label(format!("Salary budget ({symbol}):"));
                 ui.add(egui::TextEdit::singleline(&mut self.sb).desired_width(220.0));
                 ui.horizontal(|ui| {
                     for m in [5, 20] {
@@ -1017,26 +1038,19 @@ impl App {
                 self.apply_finances();
             }
             ui.add_space(8.0);
-            ui.label(RichText::new("You can type amounts like 12,500,000, 12.5m or 750k. They are saved in steps of €100, like in the game.").color(muted));
+            ui.label(RichText::new("Both amounts are as shown in the game. You can type amounts like 12,500,000, 12.5m or 750k; they are saved in steps of €100.").color(muted));
             if let Some(f) = saved {
-                ui.label(
-                    RichText::new(format!(
-                        "In the save now: transfer {} · yearly salary budget {}",
-                        self.to_display(f.transfer_eur),
-                        self.to_display(f.salary_eur)
-                    ))
-                    .color(muted),
-                );
                 if has_club {
-                    theme::chip(
-                        ui,
-                        Tone::Info,
-                        format!(
-                            "Your club's total salaries {} → salary budget left in the game ≈ {}",
-                            self.to_display(wages),
-                            self.to_display(f.salary_eur - wages)
-                        ),
+                    ui.label(
+                        RichText::new(format!(
+                            "The save stores a yearly salary budget of {}; the game shows it minus your club's salaries ({}).",
+                            self.to_display(f.salary_eur),
+                            self.to_display(wages)
+                        ))
+                        .color(muted),
                     );
+                } else {
+                    theme::chip(ui, Tone::Warn, "Choose your club first: until then the salary budget can't be shown as in the game.");
                 }
             }
         });

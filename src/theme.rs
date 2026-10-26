@@ -234,3 +234,8 @@ pub fn primary_button(ui: &Ui, text: &str) -> Button<'static> {
         .min_size(vec2(130.0, 34.0))
         .corner_radius(CornerRadius::same(RADIUS))
 }
+
+/// Plain button with the same size and corners as `primary_button`.
+pub fn secondary_button(text: &str) -> Button<'static> {
+    Button::new(text.to_owned()).min_size(vec2(130.0, 34.0)).corner_radius(CornerRadius::same(RADIUS))
+}
