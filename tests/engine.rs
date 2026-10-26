@@ -158,21 +158,26 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     let mut news = deals::BLANK_NEWS;
     (news[0], news[1], news[2], news[13]) = (0x6E, iid, pid, date(2025, 8, 6).pack());
     assert_eq!(wordsn::<14>(&game.data, deals::NEWS + deals::NEWS_ROW), news);
-    // Timeline: the first free block (after the AI club's), owner 0, round 1
-    // that day, round 2 until the window closes on 31 August.
-    let block = FIRST_ROW + deals::TIMELINE_OFFSET + deals::TIMELINE_BLOCK;
-    let expected: Vec<u8> =
-        [0, 0xFFFF, index as u16, 1, 2025, 6 << 8 | 8, 2025, 6 << 8 | 8, index as u16, 2, 2025, 6 << 8 | 8, 2025, 31 << 8 | 8]
+    // Timeline: slot 1 (slot 0 is the AI club's) gets an offer block and a
+    // contract block, owner 0, round 1 that day, round 2 until 31 August.
+    let slot = |n: usize| FIRST_ROW + deals::TIMELINE_OFFSET + n * deals::TIMELINE_SLOT;
+    let block = |number: u32| -> Vec<u8> {
+        [0, 0xFFFF, number as u16, 1, 2025, 6 << 8 | 8, 2025, 6 << 8 | 8, number as u16, 2, 2025, 6 << 8 | 8, 2025, 31 << 8 | 8]
             .iter()
             .flat_map(|v: &u16| v.to_le_bytes())
-            .collect();
-    assert_eq!(&game.data[block..block + expected.len()], &expected[..]);
+            .collect()
+    };
+    let len = block(0).len();
+    assert_eq!(&game.data[slot(1)..slot(1) + len], &block(offer_id)[..]);
+    let contract_block = slot(1) + deals::TIMELINE_BLOCK;
+    assert_eq!(&game.data[contract_block..contract_block + len], &block(index)[..]);
 
-    // A second deal takes the next free numbers and slots.
+    // A second deal takes the next free numbers, slots and timeline slot.
     let second = club_player(8, 1);
     game.transfer(agreed(8, second.player_id)).unwrap();
     assert_eq!(wordsn::<15>(&game.data, offers + 2 * deals::OFFER_RECORD)[0], index + 1);
     assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS + deals::PENDING_ENTRY)[1], second.player_id);
+    assert_eq!(&game.data[slot(2)..slot(2) + len], &block(index + 1)[..]);
     // Agreeing again on the same player is refused.
     assert!(game.transfer(agreed(7, target.player_id)).is_err());
 
@@ -277,7 +282,7 @@ fn free_agent_deal_has_no_offer_and_no_fee() {
     assert!(unchanged(deals::SEASON_DEALS, deals::DEAL_ENTRY));
     // A news item, but no negotiation timeline.
     assert_eq!(wordsn::<3>(&game.data, deals::NEWS + deals::NEWS_ROW), [0x6E, iid, pid]);
-    assert!(unchanged(FIRST_ROW + deals::TIMELINE_OFFSET + deals::TIMELINE_BLOCK, deals::TIMELINE_BLOCK));
+    assert!(unchanged(FIRST_ROW + deals::TIMELINE_OFFSET + deals::TIMELINE_SLOT, deals::TIMELINE_SLOT));
 }
 
 #[test]

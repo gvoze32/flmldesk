@@ -49,17 +49,19 @@ pub const SEASON_DEALS: usize = 0xC8_03E0;
 pub const DEAL_ENTRY: usize = 52;
 const MAX_DEALS: usize = 100;
 const NONE16: u16 = 0xFFFF;
-/// Negotiation timeline (offset from contract slot 0): one 100-byte block per
-/// negotiation. Header: u16 owner (0 for your club, 0x100… for AI clubs,
-/// 0xFF00 = free block), u16 0xFFFF; then 8 rounds of 6 × u16: contract
-/// index, round (low byte), from (year, day << 8 | month), to (same).
-pub const TIMELINE_OFFSET: usize = 0x587A4;
+/// Negotiation timeline (offset from contract slot 0): 100-byte blocks, three
+/// per negotiation slot (offer id, contract index, unused). Block header: u16
+/// owner (0 for your club, 0x100… for AI clubs, 0xFF00 = free), u16 0xFFFF;
+/// then 8 rounds of 6 × u16: number, round (low byte), from (year, day << 8 |
+/// month), to (same). The game's negotiations screen lists the slots in order.
+pub const TIMELINE_OFFSET: usize = 0x58740;
 pub const TIMELINE_BLOCK: usize = 100;
+pub const TIMELINE_SLOT: usize = 3 * TIMELINE_BLOCK;
 pub const TIMELINE_ROUND: usize = 12;
 const TIMELINE_ROUNDS: usize = 8;
 const TIMELINE_FREE: u16 = 0xFF00;
 const TIMELINE_MINE: u16 = 0;
-const MAX_TIMELINE: usize = 64;
+const MAX_TIMELINE_SLOTS: usize = 64;
 /// News items, 56 bytes: type, internal id, player id, filler, then the date in the last word.
 pub const NEWS: usize = 0xBE_3360;
 pub const NEWS_ROW: usize = 56;
@@ -146,7 +148,7 @@ pub struct DealTables {
     agreed_free: usize,
     pending_free: usize,
     deal_free: usize,
-    /// Offset of the first free timeline block.
+    /// Offset of the first free timeline slot.
     timeline_free: usize,
     news_free: usize,
 }
@@ -201,13 +203,12 @@ impl DealTables {
         })
         .ok_or_else(unknown)?;
         let timeline = table.first + TIMELINE_OFFSET;
-        let timeline_free = first_free(MAX_TIMELINE, |i| {
-            let block = timeline + i * TIMELINE_BLOCK;
+        let block_state = |block: usize| -> Option<Entry> {
             let [owner, filler] = u16s::<2>(data, block)?;
-            // A cleared round keeps its dates; only the index is reset.
+            // A cleared round keeps its dates; only the number is reset.
             let rounds_ok = (0..TIMELINE_ROUNDS).all(|r| {
-                u16s::<6>(data, block + 4 + r * TIMELINE_ROUND).is_some_and(|[index, _, y1, _, y2, _]| {
-                    index == NONE16 || (index < 2000 && (2000..=2150).contains(&y1) && (2000..=2150).contains(&y2))
+                u16s::<6>(data, block + 4 + r * TIMELINE_ROUND).is_some_and(|[number, _, y1, _, y2, _]| {
+                    number == NONE16 || (number < 2000 && (2000..=2150).contains(&y1) && (2000..=2150).contains(&y2))
                 })
             });
             Some(match (owner, filler, rounds_ok) {
@@ -215,8 +216,18 @@ impl DealTables {
                 (owner, 0xFFFF, true) if owner & 0xFF == 0 && owner >> 8 < 0x10 => Entry::Used,
                 _ => Entry::Unknown,
             })
+        };
+        // A slot is free when its offer and contract blocks are.
+        let timeline_slot = first_free(MAX_TIMELINE_SLOTS, |i| {
+            let slot = timeline + i * TIMELINE_SLOT;
+            match (block_state(slot)?, block_state(slot + TIMELINE_BLOCK)?, block_state(slot + 2 * TIMELINE_BLOCK)?) {
+                (Entry::Unknown, ..) | (_, Entry::Unknown, _) | (.., Entry::Unknown) => Some(Entry::Unknown),
+                (Entry::Free, Entry::Free, _) => Some(Entry::Free),
+                _ => Some(Entry::Used),
+            }
         })
         .ok_or_else(unknown)?;
+        let timeline_free = timeline + timeline_slot * TIMELINE_SLOT;
         let news_free = first_free(MAX_NEWS, |i| {
             let w = u32s::<14>(data, NEWS + i * NEWS_ROW)?;
             Some(if w == BLANK_NEWS {
@@ -228,7 +239,7 @@ impl DealTables {
             })
         })
         .ok_or_else(unknown)?;
-        Ok(DealTables { offers, offer_count, agreed_free, pending_free, deal_free, timeline_free: timeline + timeline_free * TIMELINE_BLOCK, news_free })
+        Ok(DealTables { offers, offer_count, agreed_free, pending_free, deal_free, timeline_free, news_free })
     }
 
     fn offer_rows(&self, data: &[u8]) -> Vec<[u32; 15]> {
@@ -281,15 +292,18 @@ impl DealTables {
                 let fee = (-(deal.fee_units as i64)) as i32 as u32;
                 let season = [p.internal_id, p.player_id, 0, 0, 0, 0, 0, 0, fee, 1, 0, 0, 0xFFFF];
                 patches.push((SEASON_DEALS + self.deal_free * DEAL_ENTRY, encode(season)));
-                // A timeline block as in the game: the club accepting, then
-                // the player's contract talks until the window closes.
-                let mut block: Vec<u8> = [TIMELINE_MINE, NONE16].iter().flat_map(|v| v.to_le_bytes()).collect();
-                for (round, from, to) in [(1, deal.today, deal.today), (2, deal.today, window_end(deal.today))] {
-                    let [y1, md1] = timeline_date(from);
-                    let [y2, md2] = timeline_date(to);
-                    block.extend([index as u16, round, y1, md1, y2, md2].iter().flat_map(|v| v.to_le_bytes()));
+                // A timeline slot as in the game: an offer block and a contract
+                // block, each with the club accepting and the player's contract
+                // talks until the window closes.
+                for (block, number) in [(0, offer_id), (1, index)] {
+                    let mut bytes: Vec<u8> = [TIMELINE_MINE, NONE16].iter().flat_map(|v| v.to_le_bytes()).collect();
+                    for (round, from, to) in [(1, deal.today, deal.today), (2, deal.today, window_end(deal.today))] {
+                        let [y1, md1] = timeline_date(from);
+                        let [y2, md2] = timeline_date(to);
+                        bytes.extend([number as u16, round, y1, md1, y2, md2].iter().flat_map(|v| v.to_le_bytes()));
+                    }
+                    patches.push((self.timeline_free + block * TIMELINE_BLOCK, bytes));
                 }
-                patches.push((self.timeline_free, block));
                 [offer_id as u16, index as u16, NONE16]
             }
             _ => [index as u16, NONE16, NONE16],

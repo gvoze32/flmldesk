@@ -137,18 +137,21 @@ pub fn build_data(localized: bool) -> Vec<u8> {
         put_words(&mut data, deals::PENDING_ARRIVALS + k * deals::PENDING_ENTRY, &[0xFFFF, 0, 0]);
         put_words(&mut data, deals::SEASON_DEALS + k * deals::DEAL_ENTRY, &[0xFFFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFFFF]);
     }
-    // Negotiation timeline: one used block (an AI club's negotiation), then free blocks.
+    // Negotiation timeline: slot 0 (blocks 0..3) is an AI club's negotiation, then free slots.
     let blank_round = [0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0];
-    for k in 0..16 {
-        let block = FIRST_ROW + deals::TIMELINE_OFFSET + k * deals::TIMELINE_BLOCK;
-        let owner: u16 = if k == 0 { 0x0100 } else { 0xFF00 };
+    let timeline = FIRST_ROW + deals::TIMELINE_OFFSET;
+    for k in 0..48 {
+        let block = timeline + k * deals::TIMELINE_BLOCK;
+        let owner: u16 = if k < 2 { 0x0100 } else { 0xFF00 };
         put(&mut data, block, &[owner.to_le_bytes(), [0xFF, 0xFF]].concat());
         for r in 0..8 {
             put(&mut data, block + 4 + r * deals::TIMELINE_ROUND, &blank_round);
         }
     }
-    let ai_round: Vec<u8> = [40u16, 1, 2025, 1 << 8 | 8, 2025, 4 << 8 | 8].iter().flat_map(|v| v.to_le_bytes()).collect();
-    put(&mut data, FIRST_ROW + deals::TIMELINE_OFFSET + 4, &ai_round);
+    for (k, number) in [(0usize, 39u16), (1, 40)] {
+        let round: Vec<u8> = [number, 1, 2025, 1 << 8 | 8, 2025, 4 << 8 | 8].iter().flat_map(|v| v.to_le_bytes()).collect();
+        put(&mut data, timeline + k * deals::TIMELINE_BLOCK + 4, &round);
+    }
     // One news item already in the list, then free rows.
     let mut item = deals::BLANK_NEWS;
     (item[0], item[13]) = (0x1B, date(2025, 8, 1).pack());
