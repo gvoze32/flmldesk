@@ -670,7 +670,8 @@ impl MasterLeague {
                 // Saves whose transfer lists aren't recognised join right away.
                 match DealTables::locate(&g.data, &table) {
                     Ok(tables) => {
-                        let arrival = g.game_date.unwrap().next_day();
+                        let today = g.game_date.unwrap();
+                        let arrival = today.next_day();
                         let deal = AgreedDeal {
                             player,
                             buyer_ref: table.team_ref,
@@ -682,6 +683,7 @@ impl MasterLeague {
                             salary_units: units,
                             value_units: value,
                             end,
+                            today,
                             arrival,
                         };
                         for (offset, bytes) in tables.agree(&g.data, &table, &deal)? {

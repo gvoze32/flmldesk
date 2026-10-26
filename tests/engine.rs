@@ -154,6 +154,19 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     assert_eq!(&game.data[FIRST_ROW + deals::AGREED_OFFSET..][..6], &pair[..]);
     assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS), [iid, pid, 25_000]);
     assert_eq!(wordsn::<13>(&game.data, deals::SEASON_DEALS), [iid, pid, 0, 0, 0, 0, 0, 0, (-123_457i32) as u32, 1, 0, 0, 0xFFFF]);
+    // News item after the existing one, dated the agreement day (6 August).
+    let mut news = deals::BLANK_NEWS;
+    (news[0], news[1], news[2], news[13]) = (0x6E, iid, pid, date(2025, 8, 6).pack());
+    assert_eq!(wordsn::<14>(&game.data, deals::NEWS + deals::NEWS_ROW), news);
+    // Timeline: the first free block (after the AI club's), owner 0, round 1
+    // that day, round 2 until the window closes on 31 August.
+    let block = FIRST_ROW + deals::TIMELINE_OFFSET + deals::TIMELINE_BLOCK;
+    let expected: Vec<u8> =
+        [0, 0xFFFF, index as u16, 1, 2025, 6 << 8 | 8, 2025, 6 << 8 | 8, index as u16, 2, 2025, 6 << 8 | 8, 2025, 31 << 8 | 8]
+            .iter()
+            .flat_map(|v: &u16| v.to_le_bytes())
+            .collect();
+    assert_eq!(&game.data[block..block + expected.len()], &expected[..]);
 
     // A second deal takes the next free numbers and slots.
     let second = club_player(8, 1);
@@ -262,6 +275,9 @@ fn free_agent_deal_has_no_offer_and_no_fee() {
     let unchanged = |off: usize, len: usize| game.data[off..off + len] == original[off..off + len];
     assert!(unchanged(offers + deals::OFFER_RECORD, deals::OFFER_RECORD));
     assert!(unchanged(deals::SEASON_DEALS, deals::DEAL_ENTRY));
+    // A news item, but no negotiation timeline.
+    assert_eq!(wordsn::<3>(&game.data, deals::NEWS + deals::NEWS_ROW), [0x6E, iid, pid]);
+    assert!(unchanged(FIRST_ROW + deals::TIMELINE_OFFSET + deals::TIMELINE_BLOCK, deals::TIMELINE_BLOCK));
 }
 
 #[test]

@@ -13,14 +13,16 @@
 //! | Agreed deals | table + `0x47720`, 6 bytes | u16 offer id, u16 contract index, `0xFFFF`; a free agent: contract index, `0xFFFF`, `0xFFFF` |
 //! | Pending arrivals | `0xC81870`, 12 bytes | internal id, player id, salary units |
 //! | Season deals | `0xC803E0`, 52 bytes | internal id, player id, six zeros, minus the fee (i32), 1, 0, 0, `0xFFFF` |
+//! | News | `0xBE3360`, 56 bytes | type `0x6E`, internal id, player id, filler, agreement date |
+//! | Negotiation timeline | table + `0x587A4`, 100-byte blocks | see `TIMELINE_OFFSET` |
 //!
-//! A free agent's deal has no offer and no season-deal row. Offer ids and
-//! contract indexes share one numbering: the lowest free number is the offer
-//! id and the next free one the contract index (a free agent's contract takes
-//! the lowest). The fee is in units of 100 EUR everywhere. The game also
-//! writes a news item and a negotiation timeline; neither is needed for the
-//! arrival, so they are left alone. Every table is checked before writing;
-//! anything unexpected fails closed.
+//! A free agent's deal has no offer, no season-deal row and no timeline.
+//! Offer ids and contract indexes share one numbering: the lowest free number
+//! is the offer id and the next free one the contract index (a free agent's
+//! contract takes the lowest). The fee is in units of 100 EUR everywhere. The
+//! timeline and news are what the game keeps for an agreed deal until the
+//! player arrives (the negotiations screen likely reads them). Every table is
+//! checked before writing; anything unexpected fails closed.
 
 use std::collections::BTreeSet;
 
@@ -47,6 +49,39 @@ pub const SEASON_DEALS: usize = 0xC8_03E0;
 pub const DEAL_ENTRY: usize = 52;
 const MAX_DEALS: usize = 100;
 const NONE16: u16 = 0xFFFF;
+/// Negotiation timeline (offset from contract slot 0): one 100-byte block per
+/// negotiation. Header: u16 owner (0 for your club, 0x100… for AI clubs,
+/// 0xFF00 = free block), u16 0xFFFF; then 8 rounds of 6 × u16: contract
+/// index, round (low byte), from (year, day << 8 | month), to (same).
+pub const TIMELINE_OFFSET: usize = 0x587A4;
+pub const TIMELINE_BLOCK: usize = 100;
+pub const TIMELINE_ROUND: usize = 12;
+const TIMELINE_ROUNDS: usize = 8;
+const TIMELINE_FREE: u16 = 0xFF00;
+const TIMELINE_MINE: u16 = 0;
+const MAX_TIMELINE: usize = 64;
+/// News items, 56 bytes: type, internal id, player id, filler, then the date in the last word.
+pub const NEWS: usize = 0xBE_3360;
+pub const NEWS_ROW: usize = 56;
+const MAX_NEWS: usize = 256;
+const NEWS_DEAL_AGREED: u32 = 0x6E;
+/// Free news row as written by the game.
+pub const BLANK_NEWS: [u32; 14] =
+    [0xFF, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF_FFFF, 0xFFFF, 0xFFFF_FFFF, 0, 0xFFFF, 0xFFFF, 0xFFFF];
+
+fn timeline_date(d: Date) -> [u16; 2] {
+    [d.year, (d.day as u16) << 8 | d.month as u16]
+}
+
+/// Last day of the transfer window the game's negotiations run to (31 August
+/// in both samples; 31 January in winter).
+fn window_end(today: Date) -> Date {
+    match today.month {
+        1 => Date { year: today.year, month: 1, day: 31 },
+        2..=8 => Date { year: today.year, month: 8, day: 31 },
+        _ => Date { year: today.year + 1, month: 1, day: 31 },
+    }
+}
 
 fn u32s<const N: usize>(data: &[u8], off: usize) -> Option<[u32; N]> {
     let bytes = data.get(off..off.checked_add(4 * N)?)?;
@@ -100,6 +135,8 @@ pub struct AgreedDeal {
     pub salary_units: u32,
     pub value_units: u32,
     pub end: Date,
+    /// In-game date the deal is agreed on.
+    pub today: Date,
     pub arrival: Date,
 }
 
@@ -109,6 +146,9 @@ pub struct DealTables {
     agreed_free: usize,
     pending_free: usize,
     deal_free: usize,
+    /// Offset of the first free timeline block.
+    timeline_free: usize,
+    news_free: usize,
 }
 
 impl DealTables {
@@ -160,7 +200,35 @@ impl DealTables {
             })
         })
         .ok_or_else(unknown)?;
-        Ok(DealTables { offers, offer_count, agreed_free, pending_free, deal_free })
+        let timeline = table.first + TIMELINE_OFFSET;
+        let timeline_free = first_free(MAX_TIMELINE, |i| {
+            let block = timeline + i * TIMELINE_BLOCK;
+            let [owner, filler] = u16s::<2>(data, block)?;
+            // A cleared round keeps its dates; only the index is reset.
+            let rounds_ok = (0..TIMELINE_ROUNDS).all(|r| {
+                u16s::<6>(data, block + 4 + r * TIMELINE_ROUND).is_some_and(|[index, _, y1, _, y2, _]| {
+                    index == NONE16 || (index < 2000 && (2000..=2150).contains(&y1) && (2000..=2150).contains(&y2))
+                })
+            });
+            Some(match (owner, filler, rounds_ok) {
+                (TIMELINE_FREE, 0xFFFF, true) => Entry::Free,
+                (owner, 0xFFFF, true) if owner & 0xFF == 0 && owner >> 8 < 0x10 => Entry::Used,
+                _ => Entry::Unknown,
+            })
+        })
+        .ok_or_else(unknown)?;
+        let news_free = first_free(MAX_NEWS, |i| {
+            let w = u32s::<14>(data, NEWS + i * NEWS_ROW)?;
+            Some(if w == BLANK_NEWS {
+                Entry::Free
+            } else if w[0] & 0xFF != 0xFF && w[13] != 0xFFFF && Date::unpack(w[13]).is_some() {
+                Entry::Used
+            } else {
+                Entry::Unknown
+            })
+        })
+        .ok_or_else(unknown)?;
+        Ok(DealTables { offers, offer_count, agreed_free, pending_free, deal_free, timeline_free: timeline + timeline_free * TIMELINE_BLOCK, news_free })
     }
 
     fn offer_rows(&self, data: &[u8]) -> Vec<[u32; 15]> {
@@ -213,6 +281,15 @@ impl DealTables {
                 let fee = (-(deal.fee_units as i64)) as i32 as u32;
                 let season = [p.internal_id, p.player_id, 0, 0, 0, 0, 0, 0, fee, 1, 0, 0, 0xFFFF];
                 patches.push((SEASON_DEALS + self.deal_free * DEAL_ENTRY, encode(season)));
+                // A timeline block as in the game: the club accepting, then
+                // the player's contract talks until the window closes.
+                let mut block: Vec<u8> = [TIMELINE_MINE, NONE16].iter().flat_map(|v| v.to_le_bytes()).collect();
+                for (round, from, to) in [(1, deal.today, deal.today), (2, deal.today, window_end(deal.today))] {
+                    let [y1, md1] = timeline_date(from);
+                    let [y2, md2] = timeline_date(to);
+                    block.extend([index as u16, round, y1, md1, y2, md2].iter().flat_map(|v| v.to_le_bytes()));
+                }
+                patches.push((self.timeline_free, block));
                 [offer_id as u16, index as u16, NONE16]
             }
             _ => [index as u16, NONE16, NONE16],
@@ -220,6 +297,12 @@ impl DealTables {
         let pair: Vec<u8> = pair.iter().flat_map(|v| v.to_le_bytes()).collect();
         patches.push((table.first + AGREED_OFFSET + self.agreed_free * AGREED_ENTRY, pair));
         patches.push((PENDING_ARRIVALS + self.pending_free * PENDING_ENTRY, encode([p.internal_id, p.player_id, deal.salary_units])));
+        let mut news = BLANK_NEWS;
+        news[0] = NEWS_DEAL_AGREED;
+        news[1] = p.internal_id;
+        news[2] = p.player_id;
+        news[13] = deal.today.pack();
+        patches.push((NEWS + self.news_free * NEWS_ROW, encode(news)));
         Ok(patches)
     }
 }
