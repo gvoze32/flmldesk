@@ -49,10 +49,8 @@ fn discovers_clubs_finances_contracts_and_description() {
     let dir = TempDir::new("discover");
     let game = open(&dir);
     assert_eq!(game.teams.len(), CLUBS);
-    assert_eq!(
-        game.finances().unwrap(),
-        Finances { transfer_eur: 50_000_000, salary_eur: 20_000_000, manager_name: "Test Manager".into() }
-    );
+    assert_eq!(game.finances().unwrap(), Finances { transfer_eur: 50_000_000, salary_eur: 20_000_000 });
+    assert_eq!(game.manager_name().unwrap(), "Test Manager");
     assert_eq!(game.contract_count(), SQUAD);
     let expected_wages: i64 = (0..SQUAD as i64).map(|j| (10_000 + j) * 100).sum();
     assert_eq!(game.wage_bill_eur(), expected_wages);
@@ -289,10 +287,31 @@ fn free_agent_deal_has_no_offer_and_no_fee() {
 fn manager_rename_keeps_neighbouring_byte() {
     let dir = TempDir::new("rename");
     let mut game = open(&dir);
-    game.set_finances(50_000_000, 20_000_000, "New Coach").unwrap();
-    assert_eq!(game.finances().unwrap().manager_name, "New Coach");
+    let budget = game.finances().unwrap();
+    game.set_manager_name("New Coach").unwrap();
+    assert_eq!(game.manager_name().unwrap(), "New Coach");
+    assert_eq!(game.finances().unwrap(), budget);
     assert_eq!(game.data[ml::MANAGER_NAME + ml::MANAGER_NAME_SIZE], b'V');
-    assert!(game.set_finances(50_000_000, 20_000_000, &"x".repeat(46)).is_err());
+    assert!(game.set_manager_name(&"x".repeat(46)).is_err());
+}
+
+#[test]
+fn manager_name_and_budget_are_independent() {
+    let dir = TempDir::new("independent");
+    let mut data = build_data(false);
+    data[ml::MANAGER_NAME..ml::MANAGER_NAME + ml::MANAGER_NAME_SIZE].fill(0);
+    let mut game = open_with(&dir, data);
+    assert!(game.manager_error.is_some() && game.manager_name().is_err());
+    game.set_finances(60_000_000, 20_000_000).unwrap();
+    assert_eq!(game.finances().unwrap().transfer_eur, 60_000_000);
+
+    let dir = TempDir::new("independent-budget");
+    let mut data = build_data(false);
+    put_words(&mut data, ml::FL26_FINANCE, &[500_000, 1, 2, 3, 4, 200_000]);
+    let mut game = open_with(&dir, data);
+    assert!(game.finance_error.is_some());
+    game.set_manager_name("New Coach").unwrap();
+    assert_eq!(game.manager_name().unwrap(), "New Coach");
 }
 
 #[test]
@@ -300,11 +319,12 @@ fn undo_restores_exact_bytes() {
     let dir = TempDir::new("undo");
     let mut game = open(&dir);
     let original = game.data.clone();
-    game.set_finances(99_000_000, 30_000_000, "New Coach").unwrap();
+    game.set_finances(99_000_000, 30_000_000).unwrap();
+    game.set_manager_name("New Coach").unwrap();
     game.transfer(incoming(7, club_player(7, 1).player_id, 1_000_000, 900_000, date(2028, 8, 31))).unwrap();
     game.transfer(TransferRequest { fee_eur: 500_000, ..TransferRequest::new(Source::Club(MANAGED), 9, club_player(0, 4).player_id) })
         .unwrap();
-    for _ in 0..3 {
+    for _ in 0..4 {
         game.undo().unwrap();
     }
     assert_eq!(game.data, original);
@@ -314,7 +334,7 @@ fn undo_restores_exact_bytes() {
 fn save_refuses_unjournaled_changes() {
     let dir = TempDir::new("unjournaled");
     let mut game = open(&dir);
-    game.set_finances(80_000_000, 20_000_000, "Test Manager").unwrap();
+    game.set_finances(80_000_000, 20_000_000).unwrap();
     game.data[0x100] ^= 1;
     let blob = std::fs::read(&game.path).unwrap();
     assert!(game.write(None).is_err());
@@ -327,7 +347,7 @@ fn write_backs_up_and_reloads() {
     let base = build_data(false);
     let mut game = open_with(&dir, base.clone());
     let original_blob = std::fs::read(&game.path).unwrap();
-    game.set_finances(80_000_000, 20_000_000, "Test Manager").unwrap();
+    game.set_finances(80_000_000, 20_000_000).unwrap();
     let (target, backup) = game.write(None).unwrap();
     assert_eq!(std::fs::read(backup.unwrap()).unwrap(), original_blob);
     let again = MasterLeague::open(&target).unwrap();

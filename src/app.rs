@@ -359,7 +359,7 @@ impl App {
             self.catalog.merge(catalog);
             msg += &format!(" Names loaded from EDIT00000000 ({} players).", fmt_int(n as i64));
         }
-        if let Some(e) = &game.finance_error {
+        for e in [&game.finance_error, &game.manager_error].into_iter().flatten() {
             msg += &format!(" WARNING: {e}");
         }
         let mut items: Vec<(String, usize)> =
@@ -434,22 +434,15 @@ impl App {
         self.results_dirty = true;
     }
 
-    /// Fills the budget fields with the values the game shows. The game shows
-    /// the stored yearly salary budget minus the club's salaries.
+    /// Fills the budget fields with the values the game shows (the stored
+    /// yearly salary budget minus the club's salaries) and the manager name.
     fn fill_finances(&mut self) {
         let Some(game) = &self.game else { return };
-        match game.finances() {
-            Ok(f) => {
-                self.tb = self.to_display(f.transfer_eur);
-                self.sb = self.to_display(f.salary_eur - game.wage_bill_eur());
-                self.manager = f.manager_name;
-            }
-            Err(_) => {
-                for s in [&mut self.tb, &mut self.sb, &mut self.manager] {
-                    s.clear();
-                }
-            }
-        }
+        (self.tb, self.sb) = match game.finances() {
+            Ok(f) => (self.to_display(f.transfer_eur), self.to_display(f.salary_eur - game.wage_bill_eur())),
+            Err(_) => Default::default(),
+        };
+        self.manager = game.manager_name().unwrap_or_default();
     }
 
     // --- transfer logic ---------------------------------------------------------
@@ -610,13 +603,23 @@ impl App {
             error_dialog("Invalid amount", "Check the budget amounts again.");
             return;
         };
-        let manager = self.manager.clone();
         let game = self.game.as_mut().unwrap();
         // The field holds what the game shows; the save stores it plus the salaries.
         let sb = sb_left + game.wage_bill_eur();
-        match game.set_finances(tb, sb, &manager) {
-            Ok(op) => {
-                self.status = op.description.clone();
+        let result = game.set_finances(tb, sb).map(|op| op.description.clone());
+        self.applied(result);
+    }
+
+    fn apply_manager(&mut self) {
+        let manager = self.manager.clone();
+        let result = self.game.as_mut().unwrap().set_manager_name(&manager).map(|op| op.description.clone());
+        self.applied(result);
+    }
+
+    fn applied(&mut self, result: Result<String, Error>) {
+        match result {
+            Ok(description) => {
+                self.status = description;
                 self.after_change();
             }
             Err(e) => error_dialog("Couldn't do that", &e.to_string()),
@@ -987,13 +990,8 @@ impl App {
             ui.label("Open an ML save first.");
             return;
         };
-        if let Some(e) = &game.finance_error {
-            let message = format!("The budget can't be edited: {e}");
-            theme::callout(ui, Tone::Warn, |ui| {
-                ui.label(message);
-            });
-            return;
-        }
+        let finance_error = game.finance_error.clone();
+        let manager_error = game.manager_error.clone();
         let saved = game.finances().ok();
         let wages = game.wage_bill_eur();
         let has_club = game.managed_team.is_some();
@@ -1007,7 +1005,13 @@ impl App {
         ui.add_space(4.0);
         let muted = theme::muted(ui);
         theme::card(ui, |ui| {
-            theme::section_title(ui, "Budget & manager");
+            theme::section_title(ui, "Finances");
+            if let Some(e) = finance_error {
+                theme::callout(ui, Tone::Warn, |ui| {
+                    ui.label(format!("The budget can't be edited: {e}"));
+                });
+                return;
+            }
             egui::Grid::new("budget").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label(format!("Transfer budget ({symbol}):"));
                 ui.add(egui::TextEdit::singleline(&mut self.tb).desired_width(220.0));
@@ -1029,12 +1033,9 @@ impl App {
                     }
                 });
                 ui.end_row();
-                ui.label("Manager name:");
-                ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
-                ui.end_row();
             });
             ui.add_space(8.0);
-            if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply")).clicked() {
+            if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply budget")).clicked() {
                 self.apply_finances();
             }
             ui.add_space(8.0);
@@ -1052,6 +1053,24 @@ impl App {
                 } else {
                     theme::chip(ui, Tone::Warn, "Choose your club first: until then the salary budget can't be shown as in the game.");
                 }
+            }
+        });
+        ui.add_space(8.0);
+        theme::card(ui, |ui| {
+            theme::section_title(ui, "Manager");
+            if let Some(e) = manager_error {
+                theme::callout(ui, Tone::Warn, |ui| {
+                    ui.label(e);
+                });
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.label("Manager name:");
+                ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
+            });
+            ui.add_space(8.0);
+            if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply name")).clicked() {
+                self.apply_manager();
             }
         });
     }

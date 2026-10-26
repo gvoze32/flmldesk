@@ -12,7 +12,8 @@
 //!   keeps it at 0xC7DD00 (confirmed against the in-game value); PES 2021 at
 //!   0xC7DE00 (ML Money Tool by Devil Cold52). The game shows the salary budget
 //!   minus the club's wage bill, and charges the transfer fee when a deal is
-//!   agreed. Manager name: UTF-8 at 0x1942C0, 46 bytes.
+//!   agreed. Manager name: UTF-8 at 0x1942C0, 46 bytes; read and edited
+//!   separately from the budget, so one being unreadable doesn't lock the other.
 //! * The save description holds the managed club and in-game date
 //!   (`Chelsea FC / Premier League\n6/8/2025\n…`).
 //!
@@ -72,12 +73,12 @@ pub enum Source {
     Others,
 }
 
+/// Transfer and salary budget; the manager name is separate (`manager_name`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finances {
     pub transfer_eur: i64,
     /// Annual salary budget; the game shows this minus the wage bill.
     pub salary_eur: i64,
-    pub manager_name: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -168,6 +169,8 @@ pub struct MasterLeague {
     national: Range<usize>,
     finance_offset: Option<usize>,
     pub finance_error: Option<String>,
+    /// Why the manager name can't be edited; `None` when it can.
+    pub manager_error: Option<String>,
     /// In-game date from the save description.
     pub game_date: Option<Date>,
     /// Managed club named in the save description.
@@ -203,6 +206,7 @@ impl MasterLeague {
             national: 0..0,
             finance_offset: None,
             finance_error: None,
+            manager_error: None,
             game_date: None,
             described_club: None,
         };
@@ -215,6 +219,7 @@ impl MasterLeague {
             Ok(offset) => game.finance_offset = Some(offset),
             Err(e) => game.finance_error = Some(e),
         }
+        game.manager_error = game.check_manager_name().err();
         game.read_description();
         Ok(game)
     }
@@ -298,14 +303,6 @@ impl MasterLeague {
 
     /// Finance block offset for this game, verified structurally; error text when untrusted.
     fn locate_finances(&self) -> Result<usize, String> {
-        let raw = self.data.get(MANAGER_NAME..MANAGER_NAME + MANAGER_NAME_SIZE).unwrap_or(&[]);
-        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        let name_ok = std::str::from_utf8(&raw[..end])
-            .is_ok_and(|n| !n.trim().is_empty() && !n.chars().any(|c| c < ' '))
-            && raw[end..].iter().all(|&b| b == 0);
-        if raw.is_empty() || !name_ok {
-            return Err("Couldn't find the manager name in this save, so the budget can't be edited.".into());
-        }
         // No cross-variant fallback: the other game's offset can hold a look-alike block.
         let off = if self.game.contains("Football Life") { FL26_FINANCE } else { PES21_FINANCE };
         let plausible = self.data.len() >= off + SALARY_BUDGET_OFFSET + 4
@@ -313,6 +310,20 @@ impl MasterLeague {
             && u32_at(&self.data, off) < 0x8000_0000
             && (1..0x8000_0000).contains(&u32_at(&self.data, off + SALARY_BUDGET_OFFSET));
         if plausible { Ok(off) } else { Err("Couldn't find the budget in this save, so it can't be edited.".into()) }
+    }
+
+    /// The manager name field holds one NUL-padded line of UTF-8; error text otherwise.
+    fn check_manager_name(&self) -> Result<(), String> {
+        let raw = self.data.get(MANAGER_NAME..MANAGER_NAME + MANAGER_NAME_SIZE).unwrap_or(&[]);
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let name_ok = std::str::from_utf8(&raw[..end])
+            .is_ok_and(|n| !n.trim().is_empty() && !n.chars().any(|c| c < ' '))
+            && raw[end..].iter().all(|&b| b == 0);
+        if !raw.is_empty() && name_ok {
+            Ok(())
+        } else {
+            Err("Couldn't find the manager name in this save, so it can't be edited.".into())
+        }
     }
 
     // --- rosters ---------------------------------------------------------
@@ -470,7 +481,6 @@ impl MasterLeague {
         Ok(Finances {
             transfer_eur: u32_at(&self.data, off) as i64 * MONEY_UNIT,
             salary_eur: u32_at(&self.data, off + SALARY_BUDGET_OFFSET) as i64 * MONEY_UNIT,
-            manager_name: text_at(&self.data, MANAGER_NAME, MANAGER_NAME_SIZE),
         })
     }
 
@@ -492,23 +502,12 @@ impl MasterLeague {
         self.set_u32(off, units.min(0x7FFF_FFFF), "Transfer budget")
     }
 
-    pub fn set_finances(&mut self, transfer_eur: i64, salary_eur: i64, manager_name: &str) -> Result<&Operation, Error> {
+    pub fn set_finances(&mut self, transfer_eur: i64, salary_eur: i64) -> Result<&Operation, Error> {
         let before = self.finances()?;
         let off = self.finance_at()?;
-        let name = manager_name.trim();
-        if name.is_empty() || name.len() >= MANAGER_NAME_SIZE {
-            return Err(Error::new(format!(
-                "Enter a manager name of at most {} letters (fewer with accents or special characters).",
-                MANAGER_NAME_SIZE - 1
-            )));
-        }
-        if manager_name.chars().any(|c| c < ' ') {
-            return Err(Error::new("The manager name contains characters that aren't allowed."));
-        }
-        if transfer_eur == before.transfer_eur && salary_eur == before.salary_eur && name == before.manager_name {
+        if transfer_eur == before.transfer_eur && salary_eur == before.salary_eur {
             return Err(Error::new("Nothing was changed."));
         }
-        let name = name.to_string();
         self.atomic(move |g| {
             let mut changes = Vec::new();
             if transfer_eur != before.transfer_eur {
@@ -519,13 +518,39 @@ impl MasterLeague {
                 g.set_u32(off + SALARY_BUDGET_OFFSET, eur_to_units(salary_eur), "Salary budget")?;
                 changes.push(format!("salary budget {} → {}", fmt_eur(before.salary_eur), fmt_eur(salary_eur)));
             }
-            if name != before.manager_name {
-                let mut bytes = name.as_bytes().to_vec();
-                bytes.resize(MANAGER_NAME_SIZE, 0);
-                g.patch(MANAGER_NAME, &bytes);
-                changes.push(format!("manager \"{}\" → \"{name}\"", before.manager_name));
-            }
             Ok(format!("Finances: {}", changes.join("; ")))
+        })
+    }
+
+    // --- manager name -------------------------------------------------------
+    pub fn manager_name(&self) -> Result<String, Error> {
+        match &self.manager_error {
+            Some(e) => Err(Error::new(e.clone())),
+            None => Ok(text_at(&self.data, MANAGER_NAME, MANAGER_NAME_SIZE)),
+        }
+    }
+
+    pub fn set_manager_name(&mut self, manager_name: &str) -> Result<&Operation, Error> {
+        let before = self.manager_name()?;
+        let name = manager_name.trim();
+        if name.is_empty() || name.len() >= MANAGER_NAME_SIZE {
+            return Err(Error::new(format!(
+                "Enter a manager name of at most {} letters (fewer with accents or special characters).",
+                MANAGER_NAME_SIZE - 1
+            )));
+        }
+        if manager_name.chars().any(|c| c < ' ') {
+            return Err(Error::new("The manager name contains characters that aren't allowed."));
+        }
+        if name == before {
+            return Err(Error::new("Nothing was changed."));
+        }
+        let name = name.to_string();
+        self.atomic(move |g| {
+            let mut bytes = name.as_bytes().to_vec();
+            bytes.resize(MANAGER_NAME_SIZE, 0);
+            g.patch(MANAGER_NAME, &bytes);
+            Ok(format!("Manager: \"{before}\" → \"{name}\""))
         })
     }
 

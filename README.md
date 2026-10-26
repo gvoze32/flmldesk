@@ -44,7 +44,8 @@ Go to the [Releases](../../releases) page and download
      game he only negotiates his salary, so leave the fee at 0.
    - Saves the app can't read the transfer lists of: the player joins your
      squad right away instead.
-6. **Budget & manager** tab: change the values and press **Apply**. Both
+6. **Budget & manager** tab: the **Finances** box holds both budgets, the
+   **Manager** box the manager name; each has its own **Apply** button. Both
    budgets are shown as in the game: the salary budget is what is left after
    your club's salaries.
 7. Click **Save (with automatic backup)**. A copy of your old save is kept in
