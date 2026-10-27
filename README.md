@@ -94,15 +94,23 @@ amounts are shown and typed; it uses the same exchange rates as the game.
 - **Free agents:** players listed under "Others (national team, no club)" may
   be free agents in the game. Moving free agents with an editor is known to
   cause "ghost players", so check them in the game first.
-- Selling has not been tested on many saves yet. After selling, check in the
-  game that everything looks right.
-- Renewing and releasing have not been tested in the game yet. A renewal only
-  changes the salary and end date of the contract; a released player has no
-  club, so check in the game that he shows up as a free agent.
-- Contracts are only changed for your own club. Moves between AI clubs only
-  change their squads.
-- A club can have at most 40 players. Shirt numbers and line-ups are set in the
-  game.
+- **Selling, releasing and moving players between AI clubs** update the
+  player's own data in the save the way the game does on a transfer: his
+  previous club, join date, competition registrations, shirt number and your
+  "My Team" list. **Renewing** also writes the new salary and end date into
+  his data, which the game keeps next to the contract. The game registers
+  moved players for competitions again; this has not been played through a
+  season change yet, so check in the game after the next season starts.
+- Selling or releasing a player from your starting eleven moves the next
+  player in your "My Team" list up: check your line-up in the game.
+- A sold or moved player keeps his shirt number when it is free at the new
+  club, otherwise he gets the lowest free number. Players on loan can't be
+  sold, released or moved by the app.
+- If the app can't read the players' data in a save, selling, releasing,
+  renewing and moving players between AI clubs are locked (a warning shows
+  when the save opens); signings and loans still work.
+- Contracts are only changed for your own club.
+- A club can have at most 40 players. Line-ups are set in the game.
 - The game's finance report won't list the fees paid through the app.
 - On a PES 2021 save without the Football Life patch, budget editing has not
   been tested yet. If the app can't find the budget, it won't let you edit it.

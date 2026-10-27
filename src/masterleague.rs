@@ -5,7 +5,9 @@
 //!
 //! * Club table at 0x50, 0x690 bytes per club: name +0x04, abbreviation +0x4A,
 //!   roster of 40 `(internal_id, player_id)` pairs at +0x14C (empty =
-//!   `(0xFFFF, 0)`), roster count in the low 7 bits of the u16 at +0x426.
+//!   `(0xFFFF, 0)`), roster count in the low 7 bits of the u16 at +0x426,
+//!   shirt numbers (u16, same order as the roster, 0 after the last player)
+//!   at +0x29A.
 //!   Clubs come first, then national teams (Albania/ALB first) up to The Old Boys.
 //! * Finance block: transfer budget u32, four zero words, then the annual
 //!   salary budget u32 (+0x14), both in units of 100 EUR. Football Life 2026
@@ -14,11 +16,18 @@
 //!   minus the club's wage bill, and charges the transfer fee when a deal is
 //!   agreed. Manager name: UTF-8 at 0x1942C0, 46 bytes; read and edited
 //!   separately from the budget, so one being unreadable doesn't lock the other.
+//! * "My Team" list of the managed club at 0xB7F8BC: 16-byte rows
+//!   `(internal id, player id, 0, flag)`, flag 0xC0 in the squad, 0xC1 just
+//!   arrived, 0xC2 on loan, 0xC7 free; club reference at 0xB7F804.
+//! * Player records: `playerdb`. Moves the editor makes itself (sales, moves
+//!   between other clubs, releases, signings that join right away) and
+//!   renewals update them like the game does.
 //! * The save description holds the managed club and in-game date
 //!   (`Chelsea FC / Premier League\n6/8/2025\n…`).
 //!
-//! Every edit goes through `patch`, which journals the previous bytes, so undo
-//! is byte-exact and saving can prove that nothing outside the journal changed.
+//! Every edit goes through `patch` (data block) or `patch_record` (player
+//! records), which journal the previous bytes, so undo is byte-exact and
+//! saving can prove that nothing outside the journal changed.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
@@ -26,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED};
 use crate::deals::{AgreedDeal, DealTables, LoanDeal};
+use crate::playerdb::{self, Move, PlayerDb};
 use crate::{Error, crypto};
 
 pub const TABLE_START: usize = 0x50;
@@ -37,6 +47,7 @@ pub const ABBR_SIZE: usize = 6;
 pub const ROSTER_OFFSET: usize = 0x14C;
 pub const COUNT_OFFSET: usize = 0x426;
 pub const COUNT_MASK: u16 = 0x7F;
+pub const NUMBERS_OFFSET: usize = 0x29A;
 pub const MAX_ROSTER: usize = 40;
 pub const EMPTY: Player = Player { internal_id: 0xFFFF, player_id: 0 };
 const MAX_SAVE: u64 = 80_000_000;
@@ -46,6 +57,11 @@ pub const PES21_FINANCE: usize = 0xC7DE00;
 pub const SALARY_BUDGET_OFFSET: usize = 0x14;
 pub const MANAGER_NAME: usize = 0x1942C0;
 pub const MANAGER_NAME_SIZE: usize = 46;
+pub const MY_TEAM_CLUB: usize = 0xB7_F804;
+pub const MY_TEAM: usize = 0xB7_F8BC;
+pub const MY_TEAM_ROW: usize = 16;
+const MY_TEAM_ROWS: usize = 64;
+const MY_TEAM_FREE: u32 = 0xC7;
 pub const MONEY_UNIT: i64 = 100;
 
 pub const NATIONAL_FIRST: [&str; 4] = ["ALB", "AND", "ARM", "AUT"];
@@ -86,6 +102,8 @@ pub struct Operation {
     pub description: String,
     /// (offset, previous bytes) in write order.
     patches: Vec<(usize, Vec<u8>)>,
+    /// Same for the player records.
+    record_patches: Vec<(usize, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +208,12 @@ pub struct MasterLeague {
     pub game_date: Option<Date>,
     /// Managed club named in the save description.
     pub described_club: Option<usize>,
+    /// Player records as opened; `records` holds the edited copy.
+    players: Option<PlayerDb>,
+    pub records: Vec<u8>,
+    /// Why the player records can't be read; selling, releasing, renewing and
+    /// moving players between other clubs need them.
+    pub players_error: Option<String>,
 }
 
 impl MasterLeague {
@@ -224,6 +248,9 @@ impl MasterLeague {
             manager_error: None,
             game_date: None,
             described_club: None,
+            players: None,
+            records: Vec::new(),
+            players_error: None,
         };
         game.teams = game.discover_clubs()?;
         game.national = game.discover_national_teams()?;
@@ -236,7 +263,25 @@ impl MasterLeague {
         }
         game.manager_error = game.check_manager_name().err();
         game.read_description();
+        game.load_players();
         Ok(game)
+    }
+
+    fn load_players(&mut self) {
+        match PlayerDb::locate(&self.data) {
+            Ok(db) => {
+                self.records = db.records.clone();
+                self.players = Some(db);
+                self.players_error = None;
+            }
+            Err(e) => {
+                self.records.clear();
+                self.players = None;
+                self.players_error = Some(format!(
+                    "{e} Selling, releasing, renewing and moving players between other clubs are locked."
+                ));
+            }
+        }
     }
 
     /// `"Chelsea FC / Premier League\n6/8/2025\nPremier League"` at desc+0x80.
@@ -424,6 +469,21 @@ impl MasterLeague {
         self.data[offset..offset + new.len()].copy_from_slice(new);
     }
 
+    fn patch_record(&mut self, offset: usize, new: &[u8]) {
+        let op = self.current.as_mut().expect("write outside an operation");
+        op.record_patches.push((offset, self.records[offset..offset + new.len()].to_vec()));
+        self.records[offset..offset + new.len()].copy_from_slice(new);
+    }
+
+    fn revert(&mut self, op: &Operation) {
+        for (offset, old) in op.patches.iter().rev() {
+            self.data[*offset..offset + old.len()].copy_from_slice(old);
+        }
+        for (offset, old) in op.record_patches.iter().rev() {
+            self.records[*offset..offset + old.len()].copy_from_slice(old);
+        }
+    }
+
     fn begin(&mut self) {
         self.current = Some(Operation::default());
     }
@@ -437,9 +497,7 @@ impl MasterLeague {
 
     fn rollback(&mut self) {
         if let Some(op) = self.current.take() {
-            for (offset, old) in op.patches.iter().rev() {
-                self.data[*offset..offset + old.len()].copy_from_slice(old);
-            }
+            self.revert(&op);
         }
     }
 
@@ -460,9 +518,7 @@ impl MasterLeague {
 
     pub fn undo(&mut self) -> Result<String, Error> {
         let op = self.history.pop().ok_or_else(|| Error::new("Nothing to undo."))?;
-        for (offset, old) in op.patches.iter().rev() {
-            self.data[*offset..offset + old.len()].copy_from_slice(old);
-        }
+        self.revert(&op);
         Ok(op.description)
     }
 
@@ -470,8 +526,14 @@ impl MasterLeague {
         self.history.iter().map(|o| o.description.as_str()).collect()
     }
 
-    fn write_roster(&mut self, index: usize, players: &[Player]) -> Result<(), Error> {
-        if players.len() > MAX_ROSTER {
+    fn shirt_numbers(&self, index: usize) -> Vec<u16> {
+        let base = Self::base(index) + NUMBERS_OFFSET;
+        (0..MAX_ROSTER).map(|j| u16_at(&self.data, base + 2 * j)).collect()
+    }
+
+    /// Squad and shirt numbers (same order; zeros after the last player), as the game keeps them.
+    fn write_squad(&mut self, index: usize, players: &[Player], numbers: &[u16]) -> Result<(), Error> {
+        if players.len() > MAX_ROSTER || numbers.len() != players.len() {
             return Err(Error::new("The destination squad would go over 40 players."));
         }
         let base = Self::base(index);
@@ -481,8 +543,70 @@ impl MasterLeague {
             bytes.extend(p.player_id.to_le_bytes());
         }
         self.patch(base + ROSTER_OFFSET, &bytes);
+        let numbers: Vec<u8> =
+            numbers.iter().chain(std::iter::repeat_n(&0, MAX_ROSTER - numbers.len())).flat_map(|n| n.to_le_bytes()).collect();
+        self.patch(base + NUMBERS_OFFSET, &numbers);
         let word = u16_at(&self.data, base + COUNT_OFFSET);
         self.patch(base + COUNT_OFFSET, &((word & !COUNT_MASK) | players.len() as u16).to_le_bytes());
+        Ok(())
+    }
+
+    /// Take the player out of a club's squad; later players and their shirt
+    /// numbers move up. Returns his shirt number.
+    fn remove_from_squad(&mut self, index: usize, player: &Player) -> Result<u16, Error> {
+        let mut squad = self.club_roster(index);
+        let mut numbers = self.shirt_numbers(index);
+        numbers.truncate(squad.len());
+        let k = squad.iter().position(|p| p == player).ok_or_else(|| Error::new("Player not found at his club."))?;
+        squad.remove(k);
+        let number = numbers.remove(k);
+        self.write_squad(index, &squad, &numbers)?;
+        Ok(number)
+    }
+
+    /// Add the player at the end of a club's squad with his old shirt number
+    /// when it is free there (as the game does), otherwise the lowest free one.
+    fn add_to_squad(&mut self, index: usize, player: Player, number: Option<u16>) -> Result<u16, Error> {
+        let mut squad = self.club_roster(index);
+        let mut numbers = self.shirt_numbers(index);
+        numbers.truncate(squad.len());
+        let taken: HashSet<u16> = numbers.iter().copied().collect();
+        let number = number
+            .filter(|n| (1..=99).contains(n) && !taken.contains(n))
+            .or_else(|| (1..=99).find(|n| !taken.contains(n)))
+            .ok_or_else(|| Error::new(format!("{} has no free shirt number.", self.teams[index].name)))?;
+        squad.push(player);
+        numbers.push(number);
+        self.write_squad(index, &squad, &numbers)?;
+        Ok(number)
+    }
+
+    /// Remove the player's row from the managed club's "My Team" list (later
+    /// rows move up), as the list holds exactly the squad plus loans. Lists
+    /// of another club, or without the player, are left alone.
+    fn drop_from_my_team(&mut self, club: usize, player: &Player) {
+        let Some(end) = MY_TEAM.checked_add(MY_TEAM_ROWS * MY_TEAM_ROW).filter(|e| *e <= self.data.len()) else { return };
+        if u32_at(&self.data, MY_TEAM_CLUB) != u32_at(&self.data, Self::base(club)) {
+            return;
+        }
+        let row = |k: usize| MY_TEAM + k * MY_TEAM_ROW;
+        let used = (0..MY_TEAM_ROWS).take_while(|&k| u32_at(&self.data, row(k) + 12) & 0xFF != MY_TEAM_FREE).count();
+        let found = (0..used).find(|&k| {
+            u32_at(&self.data, row(k)) == player.internal_id && u32_at(&self.data, row(k) + 4) == player.player_id
+        });
+        let Some(k) = found else { return };
+        let mut bytes = self.data[row(k + 1)..row(used)].to_vec();
+        bytes.extend([0xFFFFu32, 0, 0, MY_TEAM_FREE].iter().flat_map(|w| w.to_le_bytes()));
+        debug_assert!(row(k) + bytes.len() <= end);
+        self.patch(row(k), &bytes);
+    }
+
+    /// Rewrite the player's record with `change`.
+    fn update_record(&mut self, player: &Player, change: impl FnOnce(&[u8]) -> Result<Vec<u8>, Error>) -> Result<(), Error> {
+        let db = self.players.as_ref().ok_or_else(|| Error::new(self.players_error.clone().unwrap_or_default()))?;
+        let off = db.record(&self.records, player)?;
+        let new = change(&self.records[off..off + playerdb::RECORD])?;
+        self.patch_record(off, &new);
         Ok(())
     }
 
@@ -679,9 +803,9 @@ impl MasterLeague {
         if incoming && (req.salary_eur.is_none() || req.contract_end.is_none()) {
             return Err(Error::new("Enter a salary and contract end date for a player joining your club."));
         }
-        if incoming && self.game_date.is_none() {
-            return Err(Error::new("Couldn't read the in-game date from the save, so no contract was created."));
-        }
+        let Some(today) = self.game_date else {
+            return Err(Error::new("Couldn't read the in-game date from the save, so nothing was changed."));
+        };
         if outgoing {
             self.refuse_agreed_deal(self.contracts.as_ref().unwrap(), &player)?;
         }
@@ -689,6 +813,7 @@ impl MasterLeague {
         let header = format!("{label}: {} → {}", self.source_name(req.source), self.teams[req.dest].name);
         self.atomic(move |g| {
             let mut parts = vec![header];
+            let mut new_contract = None;
             if outgoing {
                 let table = g.contracts.clone().unwrap();
                 let (offset, bytes, contract) = table.removal(&g.data, &player, mine.unwrap())?;
@@ -713,7 +838,6 @@ impl MasterLeague {
                 // Saves whose transfer lists aren't recognised join right away.
                 match DealTables::locate(&g.data, &table) {
                     Ok(tables) => {
-                        let today = g.game_date.unwrap();
                         let arrival = today.next_day();
                         let deal = AgreedDeal {
                             player,
@@ -739,20 +863,30 @@ impl MasterLeague {
                         return Ok(parts.join("; "));
                     }
                     Err(_) => {
-                        let (offset, record) = table.signing(&g.data, &player, units, value, end, g.game_date.unwrap())?;
+                        let (offset, record) = table.signing(&g.data, &player, units, value, end, today)?;
                         g.patch(offset, &record);
+                        new_contract = Some((units, end));
                         parts.push(format!("salary {salary}/yr until {end}"));
                         parts.push("joined right away (this save's transfer lists weren't recognised)".into());
                     }
                 }
             }
-            if let Source::Club(i) = req.source {
-                let rest: Vec<Player> = src_roster.iter().copied().filter(|p| p.player_id != req.player_id).collect();
-                g.write_roster(i, &rest)?;
+            // The editor moves the player itself, so it also does what the game
+            // does on a move: his record, the shirt numbers and "My Team".
+            let from = match req.source {
+                Source::Club(i) => Some(u32_at(&g.data, Self::base(i))),
+                Source::Others => None,
+            };
+            g.update_record(&player, |r| playerdb::moved(r, &player, &Move { from, joined: today, contract: new_contract }))?;
+            let number = match req.source {
+                Source::Club(i) => Some(g.remove_from_squad(i, &player)?),
+                Source::Others => None,
+            };
+            let number = g.add_to_squad(req.dest, player, number)?;
+            if outgoing {
+                g.drop_from_my_team(mine.unwrap(), &player);
             }
-            let mut dest = dst_roster.clone();
-            dest.push(player);
-            g.write_roster(req.dest, &dest)?;
+            parts.push(format!("shirt number {number}"));
             if let Source::Club(i) = req.source
                 && g.club_roster(i).contains(&player)
             {
@@ -885,6 +1019,8 @@ impl MasterLeague {
         self.atomic(move |g| {
             let (offset, bytes, _) = table.renewal(&g.data, &player, club, units, end, today)?;
             g.patch(offset, &bytes);
+            // The player's record mirrors the contract's salary and end date.
+            g.update_record(&player, |r| Ok(playerdb::renewed(r, units, end)))?;
             let new = g.contract_of(&player).filter(|c| c.salary_units == units && c.end == end);
             if new.is_none() {
                 return Err(Error::new("Final check failed: the new contract can't be read."));
@@ -933,8 +1069,9 @@ impl MasterLeague {
                 g.adjust_transfer_budget(-compensation_eur)?;
                 parts.push(format!("compensation {}", fmt_eur(compensation_eur)));
             }
-            let rest: Vec<Player> = roster.iter().copied().filter(|p| *p != player).collect();
-            g.write_roster(club, &rest)?;
+            g.update_record(&player, |r| playerdb::released(r, &player))?;
+            g.remove_from_squad(club, &player)?;
+            g.drop_from_my_team(club, &player);
             if g.club_roster(club).contains(&player) || g.contract_of(&player).is_some() {
                 return Err(Error::new("Final check failed: the player is still at your club."));
             }
@@ -945,25 +1082,44 @@ impl MasterLeague {
     // --- saving -----------------------------------------------------------
     /// True when every byte that differs from the opened file lies in a journaled patch.
     fn changes_are_journaled(&self) -> bool {
-        let original = &self.save.data;
-        let mut masked = self.data.clone();
-        for op in &self.history {
-            for (offset, old) in &op.patches {
+        let mask = |current: &[u8], original: &[u8], patches: &mut dyn Iterator<Item = &(usize, Vec<u8>)>| {
+            let mut masked = current.to_vec();
+            for (offset, old) in patches {
                 masked[*offset..offset + old.len()].copy_from_slice(&original[*offset..offset + old.len()]);
             }
-        }
-        masked == *original
+            masked == original
+        };
+        let data_ok = mask(&self.data, &self.save.data, &mut self.history.iter().flat_map(|op| &op.patches));
+        let records_ok = match &self.players {
+            Some(db) => mask(&self.records, &db.records, &mut self.history.iter().flat_map(|op| &op.record_patches)),
+            None => self.records.is_empty(),
+        };
+        data_ok && records_ok
     }
 
     pub fn build(&self) -> Result<Vec<u8>, Error> {
+        self.build_save().map(|(out, _)| out)
+    }
+
+    /// The encrypted file and the save it decrypts to. Changed player records
+    /// are compressed back into their container, which can change its size.
+    fn build_save(&self) -> Result<(Vec<u8>, crypto::SaveFile), Error> {
         if !self.changes_are_journaled() {
             return Err(Error::new("Unexpected changes found in the save; nothing was saved."));
         }
         let mut save = self.save.clone();
-        save.data = self.data.clone();
+        let edited = self.players.as_ref().filter(|db| db.records != self.records);
+        save.data = match edited {
+            Some(db) => db.splice(&self.data, &self.records)?,
+            None => self.data.clone(),
+        };
+        let size = u32::try_from(save.data.len()).map_err(|_| Error::new("The save would be too large."))?;
+        save.file_header[64..68].copy_from_slice(&size.to_le_bytes());
         let out = crypto::pack(&save);
         let check = crypto::unpack(&out, true)?;
+        let spliced_ok = edited.is_none_or(|db| db.check_splice(&self.data, &check.data, &self.records));
         if check.data != save.data
+            || !spliced_ok
             || check.desc != save.desc
             || check.logo != save.logo
             || check.serial != save.serial
@@ -971,7 +1127,7 @@ impl MasterLeague {
         {
             return Err(Error::new("Couldn't confirm the new file is correct; nothing was written."));
         }
-        Ok(out)
+        Ok((out, check))
     }
 
     /// Write the edited save. Overwriting backs up the current file first.
@@ -979,7 +1135,7 @@ impl MasterLeague {
         if self.history.is_empty() {
             return Err(Error::new("There are no changes yet."));
         }
-        let out = self.build()?;
+        let (out, written) = self.build_save()?;
         let target = match target {
             Some(t) => std::path::absolute(t).map_err(|e| Error::new(e.to_string()))?,
             None => self.path.clone(),
@@ -1000,8 +1156,18 @@ impl MasterLeague {
         std::fs::rename(&tmp, &target).map_err(io)?;
         let same = target == self.path;
         if same {
-            self.save.data = self.data.clone();
+            // The file on disk is now the base: tables after the player records
+            // may have moved, so they are found again.
+            self.data = written.data.clone();
+            self.save = written;
             self.history.clear();
+            self.load_players();
+            if let Some(club) = self.managed_team {
+                self.contracts = ContractTable::detect(&self.data, club, &self.club_roster(club)).ok();
+                if self.contracts.is_none() {
+                    self.managed_team = None;
+                }
+            }
         }
         Ok((target, backup))
     }

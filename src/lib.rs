@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod deals;
 pub mod export;
 pub mod masterleague;
+pub mod playerdb;
 pub mod players;
 pub mod rating;
 pub mod update;

@@ -425,7 +425,7 @@ impl App {
             self.catalog.merge(catalog);
             msg += &format!(" Names loaded from EDIT00000000 ({} players).", fmt_int(n as i64));
         }
-        for e in [&game.finance_error, &game.manager_error].into_iter().flatten() {
+        for e in [&game.finance_error, &game.manager_error, &game.players_error].into_iter().flatten() {
             msg += &format!(" WARNING: {e}");
         }
         let mut items: Vec<(String, usize)> =

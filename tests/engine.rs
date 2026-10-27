@@ -2,9 +2,10 @@ mod common;
 
 use common::*;
 use fl_ml_desk::contracts::{BLANK, RECORD};
-use fl_ml_desk::deals;
 use fl_ml_desk::crypto;
+use fl_ml_desk::deals;
 use fl_ml_desk::masterleague::{self as ml, Finances, LoanRequest, MasterLeague, Source, TransferRequest};
+use fl_ml_desk::playerdb as pdb;
 
 fn open_with(dir: &TempDir, data: Vec<u8>) -> MasterLeague {
     let path = write_save(&dir.0.join("ML00000001"), data);
@@ -336,7 +337,7 @@ fn renewal_changes_only_salary_and_end_of_the_row() {
     let mut game = open(&dir);
     let player = club_player(MANAGED, 4);
     let off = FIRST_ROW + 4 * RECORD;
-    let (before, row_before) = (game.data.clone(), words(&game.data, off));
+    let (before, row_before, records_before) = (game.data.clone(), words(&game.data, off), game.records.clone());
     let wages = game.wage_bill_eur();
     game.renew_contract(player, 2_500_049, date(2030, 6, 30), Some("Renewed")).unwrap();
     let row = words(&game.data, off);
@@ -347,10 +348,150 @@ fn renewal_changes_only_salary_and_end_of_the_row() {
     }
     let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != game.data[i]).collect();
     assert!(changed.iter().all(|&i| (off + 36..off + 48).contains(&i)), "only the row's salary/end bytes change");
+    // His record mirrors the contract's salary and end date.
+    let r = rec(&game, player);
+    assert_eq!((u32_at(r, pdb::R_SALARY), u32_at(r, pdb::R_CONTRACT_END)), (25_000, date(2030, 6, 30).pack()));
+    let changed: Vec<usize> = (0..records_before.len()).filter(|&i| records_before[i] != game.records[i]).collect();
+    let at = record_at(player);
+    assert!(changed.iter().all(|&i| (at + pdb::R_SALARY..at + pdb::R_SALARY + 4).contains(&i)
+        || (at + pdb::R_CONTRACT_END..at + pdb::R_CONTRACT_END + 4).contains(&i)));
     assert_eq!(game.wage_bill_eur(), wages - row_before[9] as i64 * 100 + 2_500_000);
     assert_eq!(game.contract_of(&player).unwrap().end, date(2030, 6, 30));
     game.undo().unwrap();
     assert_eq!(game.data, before);
+    assert_eq!(game.records, records_before);
+}
+
+fn rec(game: &MasterLeague, p: ml::Player) -> &[u8] {
+    &game.records[record_at(p)..record_at(p) + pdb::RECORD]
+}
+
+/// Shirt numbers of the club's squad, in squad order.
+fn squad_numbers(game: &MasterLeague, club: usize) -> Vec<u16> {
+    let base = ml::TABLE_START + club * ml::RECORD_SIZE + ml::NUMBERS_OFFSET;
+    let n = game.roster(Source::Club(club)).len();
+    (0..n).map(|j| u16::from_le_bytes(game.data[base + 2 * j..][..2].try_into().unwrap())).collect()
+}
+
+fn number_after_squad(game: &MasterLeague, club: usize) -> u16 {
+    let base = ml::TABLE_START + club * ml::RECORD_SIZE + ml::NUMBERS_OFFSET;
+    let n = game.roster(Source::Club(club)).len();
+    u16::from_le_bytes(game.data[base + 2 * n..][..2].try_into().unwrap())
+}
+
+/// Player ids in the "My Team" list, up to the first free row.
+fn my_team(game: &MasterLeague) -> Vec<u32> {
+    (0..64)
+        .map(|k| wordsn::<4>(&game.data, ml::MY_TEAM + k * ml::MY_TEAM_ROW))
+        .take_while(|r| r[3] != 0xC7)
+        .map(|r| r[1])
+        .collect()
+}
+
+#[test]
+fn sale_updates_record_shirt_numbers_and_my_team_like_the_game() {
+    let dir = TempDir::new("sale-record");
+    let mut game = open(&dir);
+    let seller = club_player(MANAGED, 2);
+    game.transfer(TransferRequest::new(Source::Club(MANAGED), 7, seller.player_id)).unwrap();
+    let r = rec(&game, seller);
+    assert_eq!(u32_at(r, pdb::R_FROM_CLUB), team_ref(MANAGED));
+    assert_eq!(u32_at(r, pdb::R_SEASON_CLUB), team_ref(MANAGED), "kept until the season ends");
+    assert_eq!(u32_at(r, pdb::R_JOINED), date(2025, 8, 6).pack());
+    assert_eq!((r[pdb::R_FLAGS], r[pdb::R_STATE]), (0x0D, 4));
+    assert_eq!(wordsn::<4>(r, pdb::R_COMPETITIONS), [0xFFFF; 4], "not registered for the old club's competitions");
+    let (salary, end) = managed_terms(2);
+    assert_eq!((u32_at(r, pdb::R_SALARY), u32_at(r, pdb::R_CONTRACT_END)), (salary, end.pack()));
+    // Numbers stay with their players; his is free at club 7, so he keeps it.
+    let kept: Vec<u16> = (0..SQUAD).filter(|&j| j != 2).map(|j| shirt(MANAGED, j)).collect();
+    assert_eq!(squad_numbers(&game, MANAGED), kept);
+    assert_eq!(number_after_squad(&game, MANAGED), 0);
+    assert_eq!(squad_numbers(&game, 7).last(), Some(&shirt(MANAGED, 2)));
+    // "My Team" loses his row; the rows after it move up.
+    let listed: Vec<u32> = (0..SQUAD).rev().filter(|&j| j != 2).map(|j| club_player(MANAGED, j).player_id).collect();
+    assert_eq!(my_team(&game), listed);
+    assert_eq!(wordsn::<4>(&game.data, ml::MY_TEAM + (SQUAD - 1) * ml::MY_TEAM_ROW), [0xFFFF, 0, 0, 0xC7]);
+}
+
+#[test]
+fn ai_move_takes_the_lowest_free_number_when_his_is_taken() {
+    let dir = TempDir::new("ai");
+    let mut game = open(&dir);
+    let (before, my_list) = (game.finances().unwrap(), my_team(&game));
+    let p = club_player(5, 0);
+    game.transfer(TransferRequest { fee_eur: 9_000_000, ..TransferRequest::new(Source::Club(5), 7, p.player_id) }).unwrap();
+    assert_eq!(game.finances().unwrap(), before);
+    assert_eq!(my_team(&game), my_list);
+    // Club 7 already uses his 21, and 1 is the lowest it doesn't use.
+    assert_eq!(squad_numbers(&game, 7).last(), Some(&1));
+    let r = rec(&game, p);
+    assert_eq!((u32_at(r, pdb::R_FROM_CLUB), r[pdb::R_STATE]), (team_ref(5), 4));
+}
+
+#[test]
+fn release_leaves_a_free_agent_record() {
+    let dir = TempDir::new("release-record");
+    let mut game = open(&dir);
+    let player = club_player(MANAGED, 0);
+    game.release(player, 0, false, None).unwrap();
+    let r = rec(&game, player);
+    assert_eq!((u32_at(r, pdb::R_FROM_CLUB), u32_at(r, pdb::R_SEASON_CLUB)), (pdb::NO_CLUB, pdb::NO_CLUB));
+    assert_eq!(wordsn::<4>(r, pdb::R_COMPETITIONS), [0xFFFF; 4]);
+    assert_eq!((r[pdb::R_FLAGS], r[pdb::R_STATE]), (0x01, 0));
+    assert_eq!(u32_at(r, pdb::R_SALARY), managed_terms(0).0, "last salary stays as his demand");
+    assert_eq!(squad_numbers(&game, MANAGED), (1..SQUAD).map(|j| shirt(MANAGED, j)).collect::<Vec<_>>());
+    assert!(!my_team(&game).contains(&player.player_id));
+}
+
+#[test]
+fn player_on_loan_is_not_moved() {
+    let mut records = player_records();
+    let p = club_player(5, 1);
+    records[record_at(p) + pdb::R_FLAGS] |= pdb::FLAG_LOAN;
+    let mut game = open_with(&TempDir::new("on-loan"), build_data_with_records(false, &records));
+    let (data, recs) = (game.data.clone(), game.records.clone());
+    assert!(game.transfer(TransferRequest::new(Source::Club(5), 7, p.player_id)).is_err());
+    assert_eq!((game.data == data, game.records == recs), (true, true));
+    assert!(game.operations().is_empty());
+}
+
+#[test]
+fn unreadable_records_lock_moves_but_not_agreed_deals() {
+    let mut data = build_data(false);
+    data[PLAYERS_AT] ^= 0xFF;
+    let mut game = open_with(&TempDir::new("no-records"), data);
+    assert!(game.players_error.is_some());
+    let before = game.data.clone();
+    let seller = club_player(MANAGED, 2);
+    assert!(game.transfer(TransferRequest::new(Source::Club(MANAGED), 7, seller.player_id)).is_err());
+    assert!(game.release(seller, 0, false, None).is_err());
+    assert!(game.renew_contract(seller, 1_000_000, date(2030, 6, 30), None).is_err());
+    assert_eq!(game.data, before);
+    game.transfer(agreed(7, club_player(7, 2).player_id)).unwrap();
+}
+
+#[test]
+fn saved_records_are_recompressed_and_tables_found_again() {
+    let dir = TempDir::new("save-records");
+    let mut game = open(&dir);
+    let (seller, renewed) = (club_player(MANAGED, 2), club_player(MANAGED, 4));
+    game.transfer(TransferRequest::new(Source::Club(MANAGED), 7, seller.player_id)).unwrap();
+    game.renew_contract(renewed, 2_500_000, date(2030, 6, 30), None).unwrap();
+    let records = game.records.clone();
+    let size_before = game.data.len();
+    game.write(None).unwrap();
+    assert_ne!(game.data.len(), size_before, "the container was recompressed");
+    assert!(game.data.ends_with(&TAIL), "data after the container survives");
+    assert_eq!(game.records, records);
+    assert_eq!(game.contract_count(), SQUAD - 1, "contract table found again after the save");
+    // Another edit on the reloaded state, saved and opened from disk.
+    game.renew_contract(renewed, 3_000_000, date(2030, 6, 30), None).unwrap();
+    game.write(None).unwrap();
+    let mut again = MasterLeague::open(&game.path).unwrap();
+    again.set_managed_team(MANAGED).unwrap();
+    assert_eq!(again.records, game.records);
+    assert_eq!(u32_at(rec(&again, renewed), pdb::R_SALARY), 30_000);
+    assert_eq!(again.contract_of(&renewed).unwrap().salary_units, 30_000);
 }
 
 #[test]
@@ -402,16 +543,6 @@ fn months_until_counts_whole_months() {
     assert_eq!(today.months_until(date(2025, 9, 30)), 1);
     assert_eq!(today.months_until(date(2025, 8, 31)), 0);
     assert_eq!(today.months_until(date(2024, 1, 1)), 0);
-}
-
-#[test]
-fn ai_transfer_touches_rosters_only() {
-    let dir = TempDir::new("ai");
-    let mut game = open(&dir);
-    let before = game.finances().unwrap();
-    let pid = club_player(5, 0).player_id;
-    game.transfer(TransferRequest { fee_eur: 9_000_000, ..TransferRequest::new(Source::Club(5), 7, pid) }).unwrap();
-    assert_eq!(game.finances().unwrap(), before);
 }
 
 #[test]
