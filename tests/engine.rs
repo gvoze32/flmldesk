@@ -4,7 +4,7 @@ use common::*;
 use fl_ml_desk::contracts::{BLANK, RECORD};
 use fl_ml_desk::deals;
 use fl_ml_desk::crypto;
-use fl_ml_desk::masterleague::{self as ml, Finances, MasterLeague, Source, TransferRequest};
+use fl_ml_desk::masterleague::{self as ml, Finances, LoanRequest, MasterLeague, Source, TransferRequest};
 
 fn open_with(dir: &TempDir, data: Vec<u8>) -> MasterLeague {
     let path = write_save(&dir.0.join("ML00000001"), data);
@@ -194,6 +194,99 @@ fn player_in_a_game_negotiation_is_refused() {
     assert_eq!(game.data, before);
 }
 
+fn loan(club: usize, outgoing: bool, pid: u32, fee: i64, end: fl_ml_desk::contracts::Date) -> LoanRequest {
+    LoanRequest { club, outgoing, player_id: pid, fee_eur: fee, loan_end: end, use_transfer_budget: true, name: None }
+}
+
+fn timeline_slot(n: usize) -> usize {
+    FIRST_ROW + deals::TIMELINE_OFFSET + n * deals::TIMELINE_SLOT
+}
+
+fn u16_bytes(values: &[u16]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+#[test]
+fn loan_in_is_an_agreed_offer_without_contract_or_pending_arrival() {
+    let dir = TempDir::new("loan-in");
+    let mut game = open(&dir);
+    let original = game.data.clone();
+    let target = club_player(7, 2);
+    let (iid, pid) = (target.internal_id, target.player_id);
+    let end = date(2025, 12, 31);
+    game.loan(loan(7, false, pid, 1_000_000, end)).unwrap();
+
+    assert_eq!(game.finances().unwrap().transfer_eur, 49_000_000);
+    assert!(game.roster(Source::Club(7)).contains(&target), "the game moves him on the next day");
+    assert_eq!(game.contracts.as_ref().unwrap().find(&game.data, &target).len(), 0, "no contract row");
+    let offer_id = NEGOTIATION_INDEX + 1;
+    let offers = FIRST_ROW + deals::OFFERS_OFFSET;
+    assert_eq!(
+        wordsn::<15>(&game.data, offers + deals::OFFER_RECORD),
+        [offer_id, team_ref(MANAGED), 4, date(2025, 8, 7).pack(), 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, team_ref(7), iid, pid, 10_000, 10_000, end.pack(), 0xFFFF, 0]
+    );
+    assert_eq!(&game.data[FIRST_ROW + deals::AGREED_OFFSET..][..6], &u16_bytes(&[offer_id as u16, 0xFFFF, 0xFFFF])[..]);
+    assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS), [0xFFFF, 0, 0], "no pending arrival");
+    assert_eq!(wordsn::<13>(&game.data, deals::SEASON_DEALS), [iid, pid, 0, 0, 0, 0, 0, 0, (-10_000i32) as u32, 2, 0, 0, 0xFFFF]);
+    let mut news = deals::BLANK_NEWS;
+    (news[0], news[1], news[2], news[13]) = (0x6E, iid, pid, date(2025, 8, 6).pack());
+    assert_eq!(wordsn::<14>(&game.data, deals::NEWS + deals::NEWS_ROW), news);
+    let (today, window) = (6 << 8 | 8, 31 << 8 | 8);
+    let block = u16_bytes(&[0, 0xFFFF, offer_id as u16, 1, 2025, today, 2025, today, offer_id as u16, 2, 2025, today, 2025, window]);
+    assert_eq!(&game.data[timeline_slot(1)..][..block.len()], &block[..]);
+    assert_eq!(&game.data[timeline_slot(1) + deals::TIMELINE_BLOCK..][..4], &original[timeline_slot(1) + deals::TIMELINE_BLOCK..][..4], "contract block stays free");
+
+    assert!(game.loan(loan(7, false, pid, 0, end)).is_err(), "agreed twice");
+    game.undo().unwrap();
+    assert_eq!(game.data, original);
+}
+
+#[test]
+fn loan_out_credits_the_fee_keeps_the_contract_and_blocks_a_sale() {
+    let dir = TempDir::new("loan-out");
+    let mut game = open(&dir);
+    let player = club_player(MANAGED, 3);
+    let (iid, pid) = (player.internal_id, player.player_id);
+    let end = date(2026, 6, 30);
+    game.loan(loan(7, true, pid, 500_000, end)).unwrap();
+
+    assert_eq!(game.finances().unwrap().transfer_eur, 50_500_000);
+    assert!(game.contract_of(&player).is_some(), "his contract stays");
+    assert!(game.roster(Source::Club(MANAGED)).contains(&player));
+    let offer_id = NEGOTIATION_INDEX + 1;
+    let offers = FIRST_ROW + deals::OFFERS_OFFSET;
+    assert_eq!(
+        wordsn::<15>(&game.data, offers + deals::OFFER_RECORD),
+        [offer_id, team_ref(7), 4, date(2025, 8, 7).pack(), 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, team_ref(MANAGED), iid, pid, 5_000, 5_000, end.pack(), 0xFFFF, 0]
+    );
+    assert_eq!(wordsn::<13>(&game.data, deals::SEASON_DEALS), [iid, pid, 0, 0, 0, 0, 0, 0, 5_000, 2, 0, 0, 0xFFFF]);
+    assert_eq!(wordsn::<14>(&game.data, deals::NEWS + deals::NEWS_ROW)[0], 0x6F);
+    let block = u16_bytes(&[0, 0xFFFF, offer_id as u16, 1, 2025, 6 << 8 | 8, 2025, 31 << 8 | 8]);
+    assert_eq!(&game.data[timeline_slot(1)..][..block.len()], &block[..]);
+
+    let before = game.data.clone();
+    assert!(game.transfer(TransferRequest::new(Source::Club(MANAGED), 8, pid)).is_err(), "sale after an agreed loan");
+    assert!(game.release(player, 0, false, None).is_err(), "release after an agreed loan");
+    assert!(game.loan(loan(8, true, pid, 0, end)).is_err(), "loaned twice");
+    assert_eq!(game.data, before);
+}
+
+#[test]
+fn loan_checks_end_date_clubs_and_contract() {
+    let dir = TempDir::new("loan-bad");
+    let mut game = open(&dir);
+    let before = game.data.clone();
+    let pid = club_player(7, 2).player_id;
+    assert!(game.loan(loan(7, false, pid, 0, date(2025, 8, 7))).is_err(), "ends on arrival day");
+    assert!(game.loan(loan(MANAGED, false, pid, 0, date(2025, 12, 31))).is_err(), "own club");
+    assert!(game.loan(loan(8, false, pid, 0, date(2025, 12, 31))).is_err(), "not at that club");
+    assert!(game.loan(loan(7, false, pid, 60_000_000, date(2025, 12, 31))).is_err(), "budget");
+    let (nc, nj) = NEGOTIATING;
+    assert!(game.loan(loan(nc, false, club_player(nc, nj).player_id, 0, date(2025, 12, 31))).is_err(), "in a negotiation");
+    assert_eq!(game.data, before);
+    assert!(game.operations().is_empty());
+}
+
 #[test]
 fn next_day_rolls_over_months_and_years() {
     assert_eq!(date(2025, 8, 31).next_day(), date(2025, 9, 1));
@@ -235,6 +328,80 @@ fn sale_removes_contract_compacts_table_and_credits_fee() {
     assert_eq!(game.finances().unwrap().transfer_eur, 53_000_000);
     assert_eq!(salary_budget(&game), 20_000_000);
     assert!(game.roster(Source::Club(7)).contains(&seller));
+}
+
+#[test]
+fn renewal_changes_only_salary_and_end_of_the_row() {
+    let dir = TempDir::new("renew");
+    let mut game = open(&dir);
+    let player = club_player(MANAGED, 4);
+    let off = FIRST_ROW + 4 * RECORD;
+    let (before, row_before) = (game.data.clone(), words(&game.data, off));
+    let wages = game.wage_bill_eur();
+    game.renew_contract(player, 2_500_049, date(2030, 6, 30), Some("Renewed")).unwrap();
+    let row = words(&game.data, off);
+    assert_eq!(row[9], 25_000, "salary rounded to €100 units");
+    assert_eq!(row[11], date(2030, 6, 30).pack());
+    for w in (0..12).filter(|w| ![9, 11].contains(w)) {
+        assert_eq!(row[w], row_before[w], "word {w} must be kept");
+    }
+    let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != game.data[i]).collect();
+    assert!(changed.iter().all(|&i| (off + 36..off + 48).contains(&i)), "only the row's salary/end bytes change");
+    assert_eq!(game.wage_bill_eur(), wages - row_before[9] as i64 * 100 + 2_500_000);
+    assert_eq!(game.contract_of(&player).unwrap().end, date(2030, 6, 30));
+    game.undo().unwrap();
+    assert_eq!(game.data, before);
+}
+
+#[test]
+fn renewal_must_end_after_game_date_and_change_something() {
+    let dir = TempDir::new("renew-bad");
+    let mut game = open(&dir);
+    let player = club_player(MANAGED, 1);
+    let before = game.data.clone();
+    assert!(game.renew_contract(player, 1_000_000, date(2025, 8, 6), None).is_err());
+    let c = game.contract_of(&player).unwrap();
+    assert!(game.renew_contract(player, c.annual_eur() as i64, c.end, None).is_err());
+    assert!(game.renew_contract(club_player(7, 1), 1_000_000, date(2030, 6, 30), None).is_err(), "AI player");
+    assert_eq!(game.data, before);
+    assert!(game.operations().is_empty());
+}
+
+#[test]
+fn release_removes_contract_and_squad_place_and_pays_compensation() {
+    let dir = TempDir::new("release");
+    let mut game = open(&dir);
+    let player = club_player(MANAGED, 2);
+    let next = words(&game.data, FIRST_ROW + 3 * RECORD);
+    game.release(player, 1_500_000, true, Some("Released")).unwrap();
+    assert!(game.contract_of(&player).is_none());
+    assert_eq!(words(&game.data, FIRST_ROW + 2 * RECORD), next);
+    assert_eq!(words(&game.data, FIRST_ROW + SQUAD * RECORD), BLANK);
+    assert_eq!(game.roster(Source::Club(MANAGED)).len(), SQUAD - 1);
+    assert!(game.club_of(player.player_id).is_empty(), "no club after release");
+    assert_eq!(game.finances().unwrap().transfer_eur, 48_500_000);
+}
+
+#[test]
+fn release_without_budget_keeps_finances_and_too_large_fee_fails_closed() {
+    let dir = TempDir::new("release-budget");
+    let mut game = open(&dir);
+    let before = game.data.clone();
+    assert!(game.release(club_player(MANAGED, 0), 60_000_000, true, None).is_err());
+    assert_eq!(game.data, before);
+    let fin = game.finances().unwrap();
+    game.release(club_player(MANAGED, 0), 60_000_000, false, None).unwrap();
+    assert_eq!(game.finances().unwrap(), fin);
+}
+
+#[test]
+fn months_until_counts_whole_months() {
+    let today = date(2025, 8, 6);
+    assert_eq!(today.months_until(date(2026, 8, 6)), 12);
+    assert_eq!(today.months_until(date(2026, 8, 5)), 11);
+    assert_eq!(today.months_until(date(2025, 9, 30)), 1);
+    assert_eq!(today.months_until(date(2025, 8, 31)), 0);
+    assert_eq!(today.months_until(date(2024, 1, 1)), 0);
 }
 
 #[test]

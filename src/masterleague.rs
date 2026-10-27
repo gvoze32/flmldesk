@@ -25,7 +25,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED};
-use crate::deals::{AgreedDeal, DealTables};
+use crate::deals::{AgreedDeal, DealTables, LoanDeal};
 use crate::{Error, crypto};
 
 pub const TABLE_START: usize = 0x50;
@@ -114,6 +114,21 @@ impl TransferRequest {
             name: None,
         }
     }
+}
+
+/// A loan to or from the managed club.
+#[derive(Clone, Debug)]
+pub struct LoanRequest {
+    /// The other club: the one the player comes from (loan in) or goes to (loan out).
+    pub club: usize,
+    /// True when the managed club loans its own player out.
+    pub outgoing: bool,
+    pub player_id: u32,
+    pub fee_eur: i64,
+    pub loan_end: Date,
+    /// Charge (loan in) or credit (loan out) the fee to the transfer budget.
+    pub use_transfer_budget: bool,
+    pub name: Option<String>,
 }
 
 /// `round(value / divisor)` with ties to even, like Python's `round`.
@@ -667,6 +682,9 @@ impl MasterLeague {
         if incoming && self.game_date.is_none() {
             return Err(Error::new("Couldn't read the in-game date from the save, so no contract was created."));
         }
+        if outgoing {
+            self.refuse_agreed_deal(self.contracts.as_ref().unwrap(), &player)?;
+        }
         let label = req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id));
         let header = format!("{label}: {} → {}", self.source_name(req.source), self.teams[req.dest].name);
         self.atomic(move |g| {
@@ -745,6 +763,180 @@ impl MasterLeague {
             }
             if incoming && g.contract_of(&player).is_none() {
                 return Err(Error::new("Final check failed: the new contract can't be read."));
+            }
+            Ok(parts.join("; "))
+        })
+    }
+
+    /// Managed club, its contract table and the in-game date, needed to edit contracts.
+    fn contract_context(&self) -> Result<(usize, ContractTable, Date), Error> {
+        let (Some(club), Some(table)) = (self.managed_team, self.contracts.clone()) else {
+            return Err(Error::new("First choose the club you manage."));
+        };
+        let today = self.game_date.ok_or_else(|| Error::new("Couldn't read the in-game date from the save."))?;
+        Ok((club, table, today))
+    }
+
+    /// Refuses a player the game already has an agreed deal for (a sale or loan waiting for the next day).
+    fn refuse_agreed_deal(&self, table: &ContractTable, player: &Player) -> Result<(), Error> {
+        match DealTables::locate(&self.data, table) {
+            Ok(tables) if tables.has_agreed_offer(&self.data, player) => Err(Error::new(format!(
+                "Player ID {} already has an agreed deal (for example a loan) that the game completes on the next day.",
+                player.player_id
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Agree a loan to or from the managed club. As in the game, the fee is
+    /// paid (or received) now and the player moves on the next in-game day;
+    /// his contract stays with the club that loans him out.
+    pub fn loan(&mut self, req: LoanRequest) -> Result<&Operation, Error> {
+        let (mine, table, today) = self.contract_context()?;
+        if req.club >= self.teams.len() || req.club == mine {
+            return Err(Error::new("Choose another club (not a national team) for the loan."));
+        }
+        if req.fee_eur < 0 {
+            return Err(Error::new("The fee can't be negative."));
+        }
+        let pay = req.use_transfer_budget && req.fee_eur != 0;
+        if pay && let Some(e) = &self.finance_error {
+            return Err(Error::new(format!("{e} Untick \"Pay fee from transfer budget\" to continue.")));
+        }
+        let fee_units = u32::try_from(eur_to_units(req.fee_eur))
+            .ok()
+            .filter(|u| *u < 0x8000_0000)
+            .ok_or_else(|| Error::new("The fee is too high for the game."))?;
+        let (from, to) = if req.outgoing { (mine, req.club) } else { (req.club, mine) };
+        let chosen: Vec<Player> = self.club_roster(from).into_iter().filter(|p| p.player_id == req.player_id).collect();
+        if chosen.len() != 1 {
+            return Err(Error::new("Player not found (or listed twice) at their current club."));
+        }
+        let player = chosen[0];
+        if self.club_of(req.player_id) != [from] {
+            return Err(Error::new("The player is listed at more than one club."));
+        }
+        if self.club_roster(to).len() >= MAX_ROSTER {
+            return Err(Error::new(format!("{} already has 40 players.", self.teams[to].name)));
+        }
+        if req.outgoing {
+            if self.contract_of(&player).is_none() {
+                return Err(Error::new("Only players under contract with your club can be loaned out (not players on loan)."));
+            }
+            self.refuse_agreed_deal(&table, &player)?;
+        } else if !table.find(&self.data, &player).is_empty() {
+            return Err(Error::new(format!(
+                "Player ID {} is already in a negotiation or under contract in the game; finish or cancel that there first.",
+                player.player_id
+            )));
+        }
+        let tables = DealTables::locate(&self.data, &table)?;
+        let club_ref = |i: usize| if i == mine { table.team_ref } else { u32_at(&self.data, Self::base(i)) };
+        let arrival = today.next_day();
+        let deal = LoanDeal {
+            player,
+            buyer_ref: club_ref(to),
+            seller_ref: club_ref(from),
+            outgoing: req.outgoing,
+            fee_units,
+            loan_end: req.loan_end,
+            today,
+            arrival,
+        };
+        let label = req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id));
+        let header = format!(
+            "{label}: loan {} → {} until {}, moves {arrival}",
+            self.teams[from].name, self.teams[to].name, req.loan_end
+        );
+        self.atomic(move |g| {
+            for (offset, bytes) in tables.agree_loan(&g.data, &table, &deal)? {
+                g.patch(offset, &bytes);
+            }
+            let mut parts = vec![header];
+            if pay {
+                g.adjust_transfer_budget(if req.outgoing { req.fee_eur } else { -req.fee_eur })?;
+                parts.push(format!("fee {} {}", if req.outgoing { "received" } else { "paid" }, fmt_eur(req.fee_eur)));
+            }
+            if !DealTables::locate(&g.data, &table)?.has_agreed_offer(&g.data, &player) {
+                return Err(Error::new("Final check failed: the agreed loan can't be read."));
+            }
+            Ok(parts.join("; "))
+        })
+    }
+
+    /// The managed club's squad with each player's contract (`None` when it can't be read).
+    pub fn squad_contracts(&self) -> Vec<(Player, Option<Contract>)> {
+        let Some(club) = self.managed_team else { return Vec::new() };
+        self.club_roster(club).into_iter().map(|p| (p, self.contract_of(&p))).collect()
+    }
+
+    /// New yearly salary and end date for a player under contract with the managed club.
+    pub fn renew_contract(&mut self, player: Player, salary_eur: i64, end: Date, name: Option<&str>) -> Result<&Operation, Error> {
+        let (club, table, today) = self.contract_context()?;
+        if salary_eur < 0 {
+            return Err(Error::new("The salary can't be negative."));
+        }
+        let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).unwrap_or(u32::MAX);
+        let old = self.contract_of(&player).ok_or_else(|| Error::new("This player's contract couldn't be found; nothing was changed."))?;
+        if old.salary_units == units && old.end == end {
+            return Err(Error::new("Nothing was changed."));
+        }
+        let label = name.map_or_else(|| format!("ID {}", player.player_id), str::to_string);
+        self.atomic(move |g| {
+            let (offset, bytes, _) = table.renewal(&g.data, &player, club, units, end, today)?;
+            g.patch(offset, &bytes);
+            let new = g.contract_of(&player).filter(|c| c.salary_units == units && c.end == end);
+            if new.is_none() {
+                return Err(Error::new("Final check failed: the new contract can't be read."));
+            }
+            Ok(format!(
+                "{label}: contract {}/yr until {} → {}/yr until {end}",
+                fmt_eur(old.annual_eur() as i64),
+                old.end,
+                fmt_eur(units as i64 * SALARY_UNIT as i64)
+            ))
+        })
+    }
+
+    /// End a player's contract with the managed club and take him out of the
+    /// squad, without a new club. `compensation_eur` is paid from the transfer
+    /// budget when `use_transfer_budget` is set.
+    pub fn release(
+        &mut self,
+        player: Player,
+        compensation_eur: i64,
+        use_transfer_budget: bool,
+        name: Option<&str>,
+    ) -> Result<&Operation, Error> {
+        let (club, table, _) = self.contract_context()?;
+        if compensation_eur < 0 {
+            return Err(Error::new("The compensation can't be negative."));
+        }
+        let pay = use_transfer_budget && compensation_eur != 0;
+        if pay && let Some(e) = &self.finance_error {
+            return Err(Error::new(format!("{e} Untick \"Pay from transfer budget\" to continue.")));
+        }
+        let roster = self.club_roster(club);
+        if roster.iter().filter(|p| **p == player).count() != 1 {
+            return Err(Error::new("Player not found (or listed twice) in your squad."));
+        }
+        self.refuse_agreed_deal(&table, &player)?;
+        let label = name.map_or_else(|| format!("ID {}", player.player_id), str::to_string);
+        self.atomic(move |g| {
+            let (offset, bytes, contract) = table.removal(&g.data, &player, club)?;
+            g.patch(offset, &bytes);
+            let mut parts = vec![
+                format!("{label}: released from {}", g.teams[club].name),
+                format!("contract of {}/yr until {} removed", fmt_eur(contract.annual_eur() as i64), contract.end),
+            ];
+            if pay {
+                g.adjust_transfer_budget(-compensation_eur)?;
+                parts.push(format!("compensation {}", fmt_eur(compensation_eur)));
+            }
+            let rest: Vec<Player> = roster.iter().copied().filter(|p| *p != player).collect();
+            g.write_roster(club, &rest)?;
+            if g.club_roster(club).contains(&player) || g.contract_of(&player).is_some() {
+                return Err(Error::new("Final check failed: the player is still at your club."));
             }
             Ok(parts.join("; "))
         })

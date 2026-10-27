@@ -87,6 +87,13 @@ impl Date {
             .or_else(|| Date::new(self.year, self.month + 1, 1))
             .unwrap_or(Date { year: self.year + 1, month: 1, day: 1 })
     }
+
+    /// Whole months from `self` to `later`; 0 when `later` is not after `self`.
+    pub fn months_until(self, later: Date) -> u32 {
+        let months = (later.year as i32 - self.year as i32) * 12 + later.month as i32 - self.month as i32
+            - i32::from(later.day < self.day);
+        months.max(0) as u32
+    }
 }
 
 impl fmt::Display for Date {
@@ -293,22 +300,49 @@ impl ContractTable {
         self.first + self.rows(data).len() * RECORD
     }
 
-    /// Patch (offset, bytes) removing the player's contract; later rows move up.
-    pub fn removal(&self, data: &[u8], player: &Player, club: usize) -> Result<(usize, Vec<u8>, Contract), Error> {
+    /// The player's single "under contract" row with `club`.
+    fn contracted(&self, data: &[u8], player: &Player, club: usize) -> Result<Contract, Error> {
         let found: Vec<Contract> =
             self.find(data, player).into_iter().filter(|c| c.status == STATUS_CONTRACTED && c.club_index() == club).collect();
-        if found.len() != 1 {
-            return Err(Error::new(format!(
-                "Player ID {} has more than one contract at your club ({} rows); cancelled.",
-                player.player_id,
-                found.len()
-            )));
+        match found.len() {
+            1 => Ok(found[0]),
+            0 => Err(Error::new(format!("Player ID {} has no contract at your club; cancelled.", player.player_id))),
+            n => Err(Error::new(format!(
+                "Player ID {} has more than one contract at your club ({n} rows); cancelled.",
+                player.player_id
+            ))),
         }
-        let row = found[0];
+    }
+
+    /// Patch (offset, bytes) removing the player's contract; later rows move up.
+    pub fn removal(&self, data: &[u8], player: &Player, club: usize) -> Result<(usize, Vec<u8>, Contract), Error> {
+        let row = self.contracted(data, player, club)?;
         let end = self.end_of_rows(data);
         let mut bytes = data[row.offset + RECORD..end].to_vec();
         bytes.extend(encode(&BLANK));
         Ok((row.offset, bytes, row))
+    }
+
+    /// Patch (offset, bytes) giving the player's contract a new yearly salary
+    /// (w9) and end date (w11); every other word of the row is kept.
+    pub fn renewal(
+        &self,
+        data: &[u8],
+        player: &Player,
+        club: usize,
+        salary_units: u32,
+        end: Date,
+        today: Date,
+    ) -> Result<(usize, Vec<u8>, Contract), Error> {
+        let row = self.contracted(data, player, club)?;
+        check_terms(salary_units, end, today)?;
+        let mut w = words(data, row.offset).expect("row read above");
+        w[W_SALARY] = salary_units;
+        w[W_END] = end.pack();
+        if !is_record(Some(w)) {
+            return Err(Error::new("The new contract didn't pass the safety check."));
+        }
+        Ok((row.offset, encode(&w), row))
     }
 
     /// Patch (offset, bytes) appending a row that puts the player under
