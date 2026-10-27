@@ -25,6 +25,9 @@ What you can do:
   or your squad to a CSV file (opens in Excel).
 - **Change your finances:** transfer budget, yearly salary budget and manager
   name.
+- **Turn a league match into a win.** After a league match is over (played
+  or skipped in the game), pick it and set a winning score; the league table is
+  recalculated.
 
 The app tells you when a new version is available.
 
@@ -74,15 +77,29 @@ Go to the [Releases](../../releases) page and download
    **Manager** box the manager name; each has its own **Apply** button. Both
    budgets are shown as in the game: the salary budget is what is left after
    your club's salaries.
-8. Click **Save (with automatic backup)**. A copy of your old save is kept in
+8. **League results** tab: your club's league matches and the league table.
+   Play or skip the match in the game first, save and go back to the
+   main menu. Then select the played match, set **Your goals** higher than
+   **Opponent's goals** and press **Make it a win**. The score and the table
+   (points, wins/draws/losses, goals, positions) change.
+9. Click **Save (with automatic backup)**. A copy of your old save is kept in
    the `FLMLDesk_backup` folder next to it, just in case.
-9. Load the save in the game and check your squad and finances.
+10. Load the save in the game and check your squad, finances and league table.
 
 You can undo changes one by one before saving. **Currency** only changes how
 amounts are shown and typed; it uses the same exchange rates as the game.
 
 ## Good to know
 
+- **League results** haven't been tested in the game yet: after loading,
+  check the result and the table. Only league matches of your club that have
+  been played can be changed, and only into a win. Goal scorers, player
+  stats, the manager's record and everything else the game did after the match
+  stay as they were played (extra goals have no scorer). Cup matches can't be
+  changed: the next round is already drawn with the real winner. A league
+  table that doesn't add up to its results (for example after a points
+  deduction) or that the app can't sort the way the game does is never
+  changed. Matches can't be skipped: the game itself plays every match day.
 - **Loans** haven't been tested in the game yet, and only up to the day the
   player moves: what the game does when a loan ends is unknown. Check the
   player and your budget in the game after loading. Players without a club,

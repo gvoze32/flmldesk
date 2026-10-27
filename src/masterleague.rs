@@ -22,8 +22,9 @@
 //! * Player records: `playerdb`. Moves the editor makes itself (sales, moves
 //!   between other clubs, releases, signings that join right away) and
 //!   renewals update them like the game does.
-//! * The save description holds the managed club and in-game date
-//!   (`Chelsea FC / Premier League\n6/8/2025\n…`).
+//! * The save description holds the managed club, its league and the in-game
+//!   date (`Chelsea FC / Premier League\n6/8/2025\n…`).
+//! * League matches and tables: `league`.
 //!
 //! Every edit goes through `patch` (data block) or `patch_record` (player
 //! records), which journal the previous bytes, so undo is byte-exact and
@@ -35,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED};
 use crate::deals::{AgreedDeal, DealTables, LoanDeal};
+use crate::league::{Fixture, League, Standing};
 use crate::playerdb::{self, Move, PlayerDb};
 use crate::{Error, crypto};
 
@@ -95,6 +97,17 @@ pub struct Finances {
     pub transfer_eur: i64,
     /// Annual salary budget; the game shows this minus the wage bill.
     pub salary_eur: i64,
+}
+
+/// The managed club's league as the "League results" tab shows it.
+#[derive(Clone, Debug)]
+pub struct LeagueView {
+    /// From the save description, or "League".
+    pub name: String,
+    /// The managed club's reference in `fixtures` and `standings`.
+    pub club: u32,
+    pub fixtures: Vec<Fixture>,
+    pub standings: Vec<Standing>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -208,6 +221,8 @@ pub struct MasterLeague {
     pub game_date: Option<Date>,
     /// Managed club named in the save description.
     pub described_club: Option<usize>,
+    /// That club's league, from the description.
+    pub league_name: Option<String>,
     /// Player records as opened; `records` holds the edited copy.
     players: Option<PlayerDb>,
     pub records: Vec<u8>,
@@ -248,6 +263,7 @@ impl MasterLeague {
             manager_error: None,
             game_date: None,
             described_club: None,
+            league_name: None,
             players: None,
             records: Vec::new(),
             players_error: None,
@@ -290,10 +306,12 @@ impl MasterLeague {
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         let text = String::from_utf8_lossy(&raw[..end]).into_owned();
         let mut lines = text.lines();
-        if let Some(club) = lines.next().and_then(|l| l.split(" / ").next()) {
+        let mut first = lines.next().map(|l| l.split(" / "));
+        if let Some(club) = first.as_mut().and_then(|parts| parts.next()) {
             let matches: Vec<usize> = self.teams.iter().filter(|t| t.name == club.trim()).map(|t| t.index).collect();
             self.described_club = (matches.len() == 1).then(|| matches[0]);
         }
+        self.league_name = first.and_then(|mut parts| parts.next()).map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
         self.game_date = lines.next().and_then(|line| {
             let mut parts = line.trim().split('/').map(|p| p.parse::<u16>().ok());
             let (d, m, y) = (parts.next()??, parts.next()??, parts.next()??);
@@ -1076,6 +1094,83 @@ impl MasterLeague {
                 return Err(Error::new("Final check failed: the player is still at your club."));
             }
             Ok(parts.join("; "))
+        })
+    }
+
+    // --- league results ---------------------------------------------------
+    /// A club's reference, as the match and league tables store it.
+    fn club_ref(&self, index: usize) -> u32 {
+        u32_at(&self.data, Self::base(index))
+    }
+
+    /// Name of the club with this reference (low 14 bits = club index).
+    pub fn club_name(&self, reference: u32) -> String {
+        let index = (reference & 0x3FFF) as usize;
+        match self.teams.get(index) {
+            Some(t) if self.club_ref(index) == reference => t.name.clone(),
+            _ => format!("Club {reference:#x}"),
+        }
+    }
+
+    fn managed_league(&self) -> Result<(usize, u32, League), Error> {
+        let club = self.managed_team.ok_or_else(|| Error::new("First choose the club you manage."))?;
+        let me = self.club_ref(club);
+        Ok((club, me, League::of(&self.data, me)?))
+    }
+
+    fn league_label(&self, club: usize) -> String {
+        self.league_name.clone().filter(|_| self.described_club == Some(club)).unwrap_or_else(|| "League".into())
+    }
+
+    /// The managed club's league matches and its table.
+    pub fn league(&self) -> Result<LeagueView, Error> {
+        let (club, me, league) = self.managed_league()?;
+        Ok(LeagueView {
+            name: self.league_label(club),
+            club: me,
+            fixtures: league.fixtures_of(&self.data, me),
+            standings: league.table.standings(&self.data),
+        })
+    }
+
+    /// Turn a played league match of the managed club into a win with this
+    /// score; the league table is recalculated. Scorers, player stats and
+    /// everything else the game did after the match stay as they are.
+    pub fn set_league_win(&mut self, index: usize, our_goals: u8, their_goals: u8) -> Result<&Operation, Error> {
+        let (club, me, league) = self.managed_league()?;
+        let f = league
+            .fixtures_of(&self.data, me)
+            .into_iter()
+            .find(|f| f.index == index)
+            .ok_or_else(|| Error::new("This isn't one of your club's league matches."))?;
+        if !f.played {
+            return Err(Error::new("This match hasn't been played yet: play it in the game first, then make it a win here."));
+        }
+        if our_goals <= their_goals {
+            return Err(Error::new("Choose a winning score: your goals must be more than the opponent's."));
+        }
+        let (home, away) = if f.home == me { (our_goals, their_goals) } else { (their_goals, our_goals) };
+        if (home, away) == (f.home_goals, f.away_goals) {
+            return Err(Error::new("Nothing was changed."));
+        }
+        let patches = league.new_score(&self.data, index, home, away)?;
+        let label = self.league_label(club);
+        self.atomic(move |g| {
+            for (offset, bytes) in &patches {
+                g.patch(*offset, bytes);
+            }
+            let after = league.matches.fixture(&g.data, index);
+            if (after.home_goals, after.away_goals) != (home, away) || !after.played {
+                return Err(Error::new("Final check failed: the new score can't be read."));
+            }
+            Ok(format!(
+                "{label} round {}: {} {}–{} {} → {home}–{away}",
+                f.round,
+                g.club_name(f.home),
+                f.home_goals,
+                f.away_goals,
+                g.club_name(f.away)
+            ))
         })
     }
 

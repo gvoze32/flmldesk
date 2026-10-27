@@ -5,6 +5,7 @@ pub mod cpk;
 pub mod crypto;
 pub mod deals;
 pub mod export;
+pub mod league;
 pub mod masterleague;
 pub mod playerdb;
 pub mod players;

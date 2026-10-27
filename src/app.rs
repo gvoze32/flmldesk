@@ -1,4 +1,4 @@
-//! egui front-end: transfers, squad contracts and budget for an ongoing Master League save.
+//! egui front-end: transfers, squad contracts, budget and league results for an ongoing Master League save.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,8 @@ use eframe::egui::{self, RichText, vec2};
 use egui_extras::{Column, TableBuilder};
 use fl_ml_desk::contracts::{Contract, Date};
 use fl_ml_desk::export;
-use fl_ml_desk::masterleague::{LoanRequest, MasterLeague, Player, Source, TransferRequest, fmt_int};
+use fl_ml_desk::league::{Fixture, MAX_GOALS, Record};
+use fl_ml_desk::masterleague::{LeagueView, LoanRequest, MasterLeague, Player, Source, TransferRequest, fmt_int};
 use fl_ml_desk::players::{PlayerCatalog, PlayerInfo};
 use fl_ml_desk::rating::POSITION_NAMES;
 use fl_ml_desk::{Error, update};
@@ -111,6 +112,7 @@ enum Tab {
     Transfer,
     Squad,
     Budget,
+    League,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +145,63 @@ struct SquadRow {
     info: PlayerInfo,
     contract: Option<Contract>,
     months_left: Option<u32>,
+}
+
+#[derive(Clone)]
+struct FixtureRow {
+    fixture: Fixture,
+    home: String,
+    away: String,
+    /// Score, or "–" before the match.
+    score: String,
+    /// W, D or L for the managed club; empty before the match.
+    result: &'static str,
+}
+
+struct TableRow {
+    mine: bool,
+    position: u32,
+    club: String,
+    record: Record,
+}
+
+/// The "League results" tab's data, with club names looked up once.
+struct LeagueTab {
+    name: String,
+    club: u32,
+    fixtures: Vec<FixtureRow>,
+    table: Vec<TableRow>,
+}
+
+impl LeagueTab {
+    fn new(game: &MasterLeague, view: LeagueView) -> Self {
+        let fixtures = view
+            .fixtures
+            .into_iter()
+            .map(|f| {
+                let (ours, theirs) = f.goals_of(view.club);
+                let result = match (f.played, ours.cmp(&theirs)) {
+                    (false, _) => "",
+                    (true, std::cmp::Ordering::Greater) => "W",
+                    (true, std::cmp::Ordering::Equal) => "D",
+                    (true, std::cmp::Ordering::Less) => "L",
+                };
+                FixtureRow {
+                    home: game.club_name(f.home),
+                    away: game.club_name(f.away),
+                    score: if f.played { format!("{}–{}", f.home_goals, f.away_goals) } else { "–".into() },
+                    result,
+                    fixture: f,
+                }
+            })
+            .collect();
+        let table = view
+            .standings
+            .into_iter()
+            .map(|s| TableRow { mine: s.club == view.club, position: s.position, club: game.club_name(s.club), record: s.record })
+            .collect();
+        LeagueTab { name: view.name, club: view.club, fixtures, table }
+    }
 }
 
 /// Asks for a `.csv` path and writes `rows` there; returns the path written.
@@ -246,6 +305,13 @@ pub struct App {
     tb: String,
     sb: String,
     manager: String,
+    // league tab: `None` until a club is chosen, the error text when unreadable
+    league: Option<Result<LeagueTab, String>>,
+    league_dirty: bool,
+    /// Match index of the selected played match.
+    league_selected: Option<usize>,
+    /// (your goals, opponent's goals)
+    win_score: (u8, u8),
     // updates
     update: Option<update::Release>,
     logo: egui::TextureHandle,
@@ -304,6 +370,10 @@ impl App {
             tb: String::new(),
             sb: String::new(),
             manager: String::new(),
+            league: None,
+            league_dirty: true,
+            league_selected: None,
+            win_score: (1, 0),
             update: None,
             logo: logo_texture(&cc.egui_ctx),
         };
@@ -444,6 +514,8 @@ impl App {
         self.dest = None;
         self.fill_finances();
         self.results_dirty = true;
+        self.league_dirty = true;
+        self.league_selected = None;
         self.status = msg;
         if let Some(index) = described.or(remembered).filter(|i| *i < self.club_items.len()) {
             self.set_managed_club(index);
@@ -473,6 +545,8 @@ impl App {
                 self.dest = Some(index);
                 self.club_info.clear();
                 self.results_dirty = true;
+                self.league_dirty = true;
+                self.league_selected = None;
                 // The game shows the salary budget minus this club's salaries.
                 self.fill_finances();
             }
@@ -502,6 +576,7 @@ impl App {
     fn after_change(&mut self) {
         self.fill_finances();
         self.results_dirty = true;
+        self.league_dirty = true;
     }
 
     /// Fills the budget fields with the values the game shows (the stored
@@ -864,6 +939,37 @@ impl App {
         self.applied(result);
     }
 
+    // --- league results ---------------------------------------------------------
+    fn refresh_league(&mut self) {
+        self.league_dirty = false;
+        self.league = self
+            .game
+            .as_ref()
+            .filter(|g| g.managed_team.is_some())
+            .map(|g| g.league().map(|view| LeagueTab::new(g, view)).map_err(|e| e.to_string()));
+        let still_played = match (&self.league, self.league_selected) {
+            (Some(Ok(tab)), Some(i)) => tab.fixtures.iter().any(|r| r.fixture.index == i && r.fixture.played),
+            _ => false,
+        };
+        if !still_played {
+            self.league_selected = None;
+        }
+    }
+
+    /// Select a played match; the score starts as the nearest win (one goal more than the opponent's).
+    fn select_match(&mut self, fixture: Fixture, club: u32) {
+        let (ours, theirs) = fixture.goals_of(club);
+        self.league_selected = Some(fixture.index);
+        self.win_score = (ours.max(theirs.saturating_add(1)).min(MAX_GOALS), theirs);
+    }
+
+    fn make_win(&mut self) {
+        let Some(index) = self.league_selected else { return };
+        let (ours, theirs) = self.win_score;
+        let result = self.game.as_mut().unwrap().set_league_win(index, ours, theirs).map(|op| op.description.clone());
+        self.applied(result);
+    }
+
     fn apply_manager(&mut self) {
         let manager = self.manager.clone();
         let result = self.game.as_mut().unwrap().set_manager_name(&manager).map(|op| op.description.clone());
@@ -888,7 +994,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(2.0);
                 ui.label(RichText::new("FL ML Desk").heading().strong().color(theme::accent(ui)));
-                ui.label(RichText::new("Master League transfers, contracts & budget · Football Life 2026 / PES 2021").color(theme::muted(ui)));
+                ui.label(RichText::new("Master League transfers, contracts, budget & league results · Football Life 2026 / PES 2021").color(theme::muted(ui)));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Check for updates").clicked() {
@@ -1021,7 +1127,12 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            for (tab, title) in [(Tab::Transfer, "Player transfers"), (Tab::Squad, "My squad & contracts"), (Tab::Budget, "Budget & manager")] {
+            for (tab, title) in [
+                (Tab::Transfer, "Player transfers"),
+                (Tab::Squad, "My squad & contracts"),
+                (Tab::Budget, "Budget & manager"),
+                (Tab::League, "League results"),
+            ] {
                 let text = RichText::new(title).strong().size(15.0);
                 if ui.add(egui::Button::selectable(self.tab == tab, text).min_size(vec2(150.0, 32.0))).clicked() {
                     self.tab = tab;
@@ -1587,6 +1698,207 @@ impl App {
             }
         });
     }
+
+    fn league_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(game) = &self.game else {
+            ui.label("Open an ML save first.");
+            return;
+        };
+        if game.managed_team.is_none() {
+            ui.label("First choose the club you manage (above).");
+            return;
+        }
+        let date = game.game_date;
+        if self.league_dirty {
+            self.refresh_league();
+        }
+        let tab = match &self.league {
+            Some(Ok(tab)) => tab,
+            Some(Err(e)) => {
+                theme::callout(ui, Tone::Warn, |ui| {
+                    ui.add(egui::Label::new(format!("League results can't be changed in this save: {e}")).wrap());
+                });
+                return;
+            }
+            None => return,
+        };
+        let played = tab.fixtures.iter().filter(|r| r.fixture.played).count();
+        let muted = theme::muted(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("{} · {played} of {} league matches played", tab.name, tab.fixtures.len()));
+            if let Some(d) = date {
+                ui.label(RichText::new(format!("In-game date: {d}")).color(muted));
+            }
+        });
+        ui.add_space(4.0);
+        theme::callout(ui, Tone::Info, |ui| {
+            ui.add(
+                egui::Label::new(
+                    "Play or skip the match in the game, save and go back to the main menu. Then pick it here \
+                     and make it a win: the score and the league table change; scorers and player stats stay as played.",
+                )
+                .wrap(),
+            );
+        });
+        ui.add_space(4.0);
+        egui::Panel::bottom("league_form").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6))).show(ui, |ui| {
+            theme::card(ui, |ui| self.league_form(ui))
+        });
+        egui::Panel::right("league_table")
+            .resizable(true)
+            .default_size(420.0)
+            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 10, ..Default::default() }))
+            .show(ui, |ui| self.standings_table(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.fixtures_table(ui));
+    }
+
+    fn fixtures_table(&mut self, ui: &mut egui::Ui) {
+        let Some(Ok(tab)) = &self.league else { return };
+        let (muted, accent) = (theme::muted(ui), theme::accent(ui));
+        let mut clicked = None;
+        TableBuilder::new(ui)
+            .id_salt("fixtures")
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(56.0))
+            .column(Column::exact(96.0))
+            .column(Column::initial(170.0).at_least(110.0).clip(true))
+            .column(Column::exact(56.0))
+            .column(Column::initial(170.0).at_least(110.0).clip(true))
+            .column(Column::remainder().at_least(48.0))
+            .header(22.0, |mut header| {
+                for title in ["Round", "Date", "Home", "Score", "Away", "Result"] {
+                    header.col(|ui| {
+                        ui.strong(title);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(20.0, tab.fixtures.len(), |mut row| {
+                    let r = &tab.fixtures[row.index()];
+                    row.set_selected(self.league_selected == Some(r.fixture.index));
+                    let date = r.fixture.date.map(|d| d.to_string()).unwrap_or_default();
+                    let mine = |name: &str, side: u32| {
+                        let text = RichText::new(name);
+                        if side == tab.club { text.strong().color(accent) } else { text }
+                    };
+                    let plain = |text: String| if r.fixture.played { RichText::new(text) } else { RichText::new(text).color(muted) };
+                    row.col(|ui| {
+                        ui.label(plain(r.fixture.round.to_string()));
+                    });
+                    row.col(|ui| {
+                        ui.label(plain(date));
+                    });
+                    row.col(|ui| {
+                        ui.label(mine(&r.home, r.fixture.home));
+                    });
+                    row.col(|ui| {
+                        ui.label(plain(r.score.clone()).strong());
+                    });
+                    row.col(|ui| {
+                        ui.label(mine(&r.away, r.fixture.away));
+                    });
+                    row.col(|ui| {
+                        ui.label(r.result);
+                    });
+                    if row.response().clicked() && r.fixture.played {
+                        clicked = Some(r.fixture);
+                    }
+                });
+            });
+        if let Some(fixture) = clicked {
+            let club = tab.club;
+            self.select_match(fixture, club);
+        }
+    }
+
+    fn standings_table(&self, ui: &mut egui::Ui) {
+        let Some(Ok(tab)) = &self.league else { return };
+        let accent = theme::accent(ui);
+        TableBuilder::new(ui)
+            .id_salt("standings")
+            .striped(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(28.0))
+            .column(Column::remainder().at_least(120.0).clip(true))
+            .columns(Column::exact(28.0), 4)
+            .column(Column::exact(52.0))
+            .column(Column::exact(36.0))
+            .column(Column::exact(36.0))
+            .header(22.0, |mut header| {
+                for title in ["#", "Club", "P", "W", "D", "L", "Goals", "GD", "Pts"] {
+                    header.col(|ui| {
+                        ui.strong(title);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(20.0, tab.table.len(), |mut row| {
+                    let t = &tab.table[row.index()];
+                    let r = t.record;
+                    let cells = [
+                        t.position.to_string(),
+                        t.club.clone(),
+                        r.played.to_string(),
+                        r.won.to_string(),
+                        r.drawn.to_string(),
+                        r.lost.to_string(),
+                        format!("{}:{}", r.goals_for, r.goals_against),
+                        format!("{:+}", r.goal_difference()),
+                        r.points.to_string(),
+                    ];
+                    for text in cells {
+                        row.col(|ui| {
+                            ui.label(if t.mine { RichText::new(text).strong().color(accent) } else { RichText::new(text) });
+                        });
+                    }
+                });
+            });
+    }
+
+    fn league_form(&mut self, ui: &mut egui::Ui) {
+        let Some(Ok(tab)) = &self.league else { return };
+        let row = self.league_selected.and_then(|i| tab.fixtures.iter().find(|r| r.fixture.index == i)).cloned();
+        let Some(row) = row else {
+            theme::section_title(ui, "Make it a win");
+            ui.label("Select a played match in the list.");
+            return;
+        };
+        let at_home = row.fixture.home == tab.club;
+        let league = tab.name.clone();
+        ui.horizontal_wrapped(|ui| {
+            theme::section_title(ui, "Make it a win");
+            ui.strong(format!("{league} round {}: {} {} {}", row.fixture.round, row.home, row.score, row.away));
+        });
+        let (ours, theirs) = self.win_score;
+        let (home, away) = if at_home { (ours, theirs) } else { (theirs, ours) };
+        let changed = (home, away) != (row.fixture.home_goals, row.fixture.away_goals);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Your goals:");
+            ui.add(egui::DragValue::new(&mut self.win_score.0).range(0..=MAX_GOALS));
+            ui.add_space(8.0);
+            ui.label("Opponent's goals:");
+            ui.add(egui::DragValue::new(&mut self.win_score.1).range(0..=MAX_GOALS));
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("New score: {} {home}–{away} {}", row.home, row.away)).color(theme::tone_color(ui, Tone::Info)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(self.busy == 0 && ours > theirs && changed, theme::primary_button(ui, "Make it a win")).clicked() {
+                    self.make_win();
+                }
+            });
+        });
+        if ours <= theirs {
+            ui.label(RichText::new("Your goals must be more than the opponent's.").color(theme::tone_color(ui, Tone::Warn)));
+        }
+        ui.label(
+            RichText::new(
+                "Only league matches can be changed. Not tested in the game yet: after loading, check the result and the table.",
+            )
+            .color(theme::tone_color(ui, Tone::Warn)),
+        );
+    }
 }
 
 /// The window icon, shown again in the header.
@@ -1621,6 +1933,7 @@ impl eframe::App for App {
             Tab::Transfer => self.transfer_tab(ui),
             Tab::Squad => self.squad_tab(ui),
             Tab::Budget => self.budget_tab(ui),
+            Tab::League => self.league_tab(ui),
         });
     }
 }
