@@ -81,6 +81,20 @@ fn pes21_budget_block_is_found_at_its_own_offset() {
 }
 
 #[test]
+fn second_season_budget_block_is_editable() {
+    // From a second-season FL26 save: +0x10 holds the transfer budget the season started with.
+    let dir = TempDir::new("second-season");
+    let mut data = build_data(false);
+    put_words(&mut data, ml::FL26_FINANCE, &[1_251_105, 0, 0, 0, 1_251_105, 2_340_967]);
+    let mut game = open_with(&dir, data);
+    assert!(game.finance_error.is_none());
+    let fin = game.finances().unwrap();
+    assert_eq!((fin.transfer_eur, fin.salary_eur), (125_110_500, 234_096_700));
+    game.set_finances(100_000_000, 234_096_700).unwrap();
+    assert_eq!(u32_at(&game.data, ml::FL26_FINANCE + 0x10), 1_251_105);
+}
+
+#[test]
 fn unrecognised_lists_fall_back_to_joining_right_away() {
     // The row before contract slot 0 lost its marker, so no agreed deal can be written.
     let mut data = build_data(false);

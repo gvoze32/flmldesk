@@ -9,8 +9,10 @@
 //!   shirt numbers (u16, same order as the roster, 0 after the last player)
 //!   at +0x29A.
 //!   Clubs come first, then national teams (Albania/ALB first) up to The Old Boys.
-//! * Finance block: transfer budget u32, four zero words, then the annual
-//!   salary budget u32 (+0x14), both in units of 100 EUR. Football Life 2026
+//! * Finance block: transfer budget u32, three zero words, a word that is 0
+//!   in the first season and later holds the transfer budget the season
+//!   started with (left alone), then the annual salary budget u32 (+0x14),
+//!   both budgets in units of 100 EUR. Football Life 2026
 //!   keeps it at 0xC7DD00 (confirmed against the in-game value); PES 2021 at
 //!   0xC7DE00 (ML Money Tool by Devil Cold52). The game shows the salary budget
 //!   minus the club's wage bill, and charges the transfer fee when a deal is
@@ -57,6 +59,8 @@ const MAX_SAVE: u64 = 80_000_000;
 pub const FL26_FINANCE: usize = 0xC7DD00;
 pub const PES21_FINANCE: usize = 0xC7DE00;
 pub const SALARY_BUDGET_OFFSET: usize = 0x14;
+/// Transfer budget at the start of the season; 0 during the first season.
+const SEASON_START_BUDGET_OFFSET: usize = 0x10;
 pub const MANAGER_NAME: usize = 0x1942C0;
 pub const MANAGER_NAME_SIZE: usize = 46;
 pub const MY_TEAM_CLUB: usize = 0xB7_F804;
@@ -384,7 +388,7 @@ impl MasterLeague {
         // No cross-variant fallback: the other game's offset can hold a look-alike block.
         let off = if self.game.contains("Football Life") { FL26_FINANCE } else { PES21_FINANCE };
         let plausible = self.data.len() >= off + SALARY_BUDGET_OFFSET + 4
-            && (4..SALARY_BUDGET_OFFSET).step_by(4).all(|gap| u32_at(&self.data, off + gap) == 0)
+            && (4..SEASON_START_BUDGET_OFFSET).step_by(4).all(|gap| u32_at(&self.data, off + gap) == 0)
             && u32_at(&self.data, off) < 0x8000_0000
             && (1..0x8000_0000).contains(&u32_at(&self.data, off + SALARY_BUDGET_OFFSET));
         if plausible { Ok(off) } else { Err("Couldn't find the budget in this save, so it can't be edited.".into()) }
