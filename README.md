@@ -1,7 +1,7 @@
 # FL ML Desk
 
-A simple Windows app for editing your **Football Life 2026** or **PES 2021**
-Master League save while your career is in progress.
+A simple Windows app for editing your **Football Life 2027**, **Football Life
+2026** or **PES 2021** Master League save while your career is in progress.
 
 What you can do:
 
@@ -43,6 +43,7 @@ Go to the [Releases](../../releases) page and download
 2. Open `FLMLDesk-vX.Y.Z-windows-x64.exe`.
 3. Click **Open ML save…**, or drag your save file onto the window. Saves are in
    `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`
+   (Football Life 2027: `Documents\SPGAME\Football Life\2027\save\`)
    and are named like `ML00000001`.
    - The app finds your club and the in-game date by itself.
 4. **Game folder (names/OVR)…** (only once): choose the folder where the game is
@@ -131,6 +132,10 @@ amounts are shown and typed; it uses the same exchange rates as the game.
 - The game's finance report won't list the fees paid through the app.
 - On a PES 2021 save without the Football Life patch, budget editing has not
   been tested yet. If the app can't find the budget, it won't let you edit it.
+- **Football Life 2027** saves have only been opened, edited, saved and opened
+  again by the app; none has been loaded in the game after editing yet. Check
+  your squad, budget and league table in the game. For FL27 player names, OVR
+  and ages, choose the FL27 game folder (step 4).
 
 ## Credits
 

@@ -994,7 +994,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(2.0);
                 ui.label(RichText::new("FL ML Desk").heading().strong().color(theme::accent(ui)));
-                ui.label(RichText::new("Master League transfers, contracts, budget & league results · Football Life 2026 / PES 2021").color(theme::muted(ui)));
+                ui.label(RichText::new("Master League transfers, contracts, budget & league results · Football Life 2027 / 2026 / PES 2021").color(theme::muted(ui)));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Check for updates").clicked() {

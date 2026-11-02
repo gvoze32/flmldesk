@@ -69,6 +69,20 @@ fn localized_team_names_use_abbreviations() {
 }
 
 #[test]
+fn fl27_save_opens_and_is_saved_with_its_own_key() {
+    let dir = TempDir::new("fl27");
+    let (y, m, d) = GAME_DATE;
+    let path = write_save_as(&dir.0.join("ML00000001"), build_data(false), "SP Football Life 2027", &format!("Club 0 / League\n{d}/{m}/{y}\nLeague"));
+    let mut game = MasterLeague::open(&path).unwrap();
+    assert_eq!(game.game, "SP Football Life 2027");
+    game.set_finances(60_000_000, 20_000_000).unwrap();
+    game.write(None).unwrap();
+    let saved = crypto::unpack(&std::fs::read(&path).unwrap(), true).unwrap();
+    assert_eq!(saved.master_key, &crypto::FL27_KEY);
+    assert_eq!(MasterLeague::open(&path).unwrap().finances().unwrap().transfer_eur, 60_000_000);
+}
+
+#[test]
 fn pes21_budget_block_is_found_at_its_own_offset() {
     let dir = TempDir::new("pes21");
     let mut data = build_data(false);

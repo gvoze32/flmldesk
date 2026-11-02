@@ -13,7 +13,8 @@
 //!   in the first season and later holds the transfer budget the season
 //!   started with (left alone), then the annual salary budget u32 (+0x14),
 //!   both budgets in units of 100 EUR. Football Life 2026
-//!   keeps it at 0xC7DD00 (confirmed against the in-game value); PES 2021 at
+//!   keeps it at 0xC7DD00 (confirmed against the in-game value), FL27 too
+//!   (found there in a real save, value not checked in game); PES 2021 at
 //!   0xC7DE00 (ML Money Tool by Devil Cold52). The game shows the salary budget
 //!   minus the club's wage bill, and charges the transfer fee when a deal is
 //!   agreed. Manager name: UTF-8 at 0x1942C0, 46 bytes; read and edited

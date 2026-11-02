@@ -4,17 +4,29 @@
 //! description, logo, data and serial blocks. Every block is XORed with an
 //! MT19937-derived keystream. `enc_header[0..256]` holds the SHA-512 digests of
 //! the four blocks, so editing `data` changes the rolling key of every block.
+//! Football Life 2027 encrypts with its own master key (published by SmokePatch
+//! as `FL_key.bin`); everything else is the same.
 
 use sha2::{Digest, Sha512};
 
 use crate::Error;
 
-pub const MASTER_KEY: [u8; 64] = [
+/// PES 2021, and Football Life up to 2026.
+pub const PES21_KEY: [u8; 64] = [
     0x90, 0x61, 0xD8, 0x66, 0x43, 0x77, 0x24, 0xF8, 0x92, 0xBA, 0xB8, 0x71, 0x21, 0xC7, 0x60, 0x63,
     0xF0, 0x91, 0x9A, 0x7D, 0xED, 0x47, 0x80, 0xDE, 0x51, 0xF5, 0xDD, 0xD1, 0x08, 0xFE, 0x32, 0x84,
     0xF5, 0x09, 0x92, 0x00, 0xB2, 0x3E, 0x88, 0x9F, 0xEB, 0x24, 0x43, 0x05, 0x58, 0x76, 0x00, 0x22,
     0x9B, 0xFE, 0xEC, 0xF6, 0x50, 0x00, 0x29, 0xD3, 0x42, 0x75, 0x50, 0xB9, 0xEC, 0xD2, 0xF6, 0x75,
 ];
+/// Football Life 2027.
+pub const FL27_KEY: [u8; 64] = [
+    0xCE, 0xF7, 0x98, 0xB8, 0x71, 0x82, 0x31, 0xB5, 0x32, 0x5D, 0xFB, 0xC7, 0x30, 0x1B, 0xA4, 0xAD,
+    0xF8, 0x4F, 0xD4, 0xD8, 0x5C, 0x4B, 0x0E, 0x6B, 0x4F, 0x3E, 0xAC, 0x61, 0xF2, 0x28, 0x15, 0xC9,
+    0x0C, 0x43, 0x10, 0x55, 0x97, 0xC1, 0x3F, 0x00, 0xD3, 0x67, 0x4F, 0x3B, 0x63, 0x73, 0x1F, 0x9D,
+    0x28, 0xE4, 0x79, 0xB7, 0x33, 0x33, 0x13, 0x66, 0xB8, 0x71, 0x09, 0x92, 0x5E, 0x90, 0x2C, 0x05,
+];
+/// Tried in order when opening a file; a wrong key decrypts the block sizes to garbage.
+pub const MASTER_KEYS: [&[u8; 64]; 2] = [&PES21_KEY, &FL27_KEY];
 pub const ENC_HEADER_SIZE: usize = 320;
 pub const FILE_HEADER_SIZE: usize = 208;
 
@@ -117,9 +129,9 @@ fn fold64(base: &[u8], extra: &[u8]) -> [u8; 64] {
     out
 }
 
-fn header_key_mask() -> [u8; 64] {
+fn header_key_mask(master_key: &[u8; 64]) -> [u8; 64] {
     let mut out = [0u8; 64];
-    for (i, chunk) in MASTER_KEY.chunks_exact(8).enumerate() {
+    for (i, chunk) in master_key.chunks_exact(8).enumerate() {
         for (j, b) in chunk.iter().rev().enumerate() {
             out[i * 8 + j] = *b;
         }
@@ -149,6 +161,8 @@ pub struct SaveFile {
     pub logo: Vec<u8>,
     pub data: Vec<u8>,
     pub serial: Vec<u8>,
+    /// Master key the file was encrypted with; `pack` uses it again.
+    pub master_key: &'static [u8; 64],
 }
 
 fn header_text(bytes: &[u8]) -> String {
@@ -176,20 +190,23 @@ pub fn unpack(blob: &[u8], verify: bool) -> Result<SaveFile, Error> {
         return Err(Error::new("The file is too small to be a PES/FL save."));
     }
     let salt = &blob[256..320];
-    let mut enc = crypt(&fold64(salt, &header_key_mask()), &blob[..ENC_HEADER_SIZE]);
-    enc[256..320].copy_from_slice(salt);
-    let rolling = fold64(&enc[..64], &enc[64..320]);
-    let mut pos = ENC_HEADER_SIZE;
-    let fh = crypt(&block_key(&rolling, 208), &blob[pos..pos + FILE_HEADER_SIZE]);
-    pos += FILE_HEADER_SIZE;
-    let field = |i: usize| u32::from_le_bytes(fh[64 + 4 * i..68 + 4 * i].try_into().unwrap()) as usize;
-    let (data_size, logo_size, desc_size, serial_len) = (field(0), field(1), field(2), field(3));
-    let sizes = [desc_size, logo_size, data_size, serial_len * 2];
-    if pos + sizes.iter().sum::<usize>() != blob.len() {
-        return Err(Error::new(
-            "The file size doesn't add up; it isn't a PES 2021/FL save or the file is damaged.",
-        ));
-    }
+    let (master_key, enc, rolling, fh, sizes) = MASTER_KEYS
+        .iter()
+        .find_map(|&master_key| {
+            let mut enc = crypt(&fold64(salt, &header_key_mask(master_key)), &blob[..ENC_HEADER_SIZE]);
+            enc[256..320].copy_from_slice(salt);
+            let rolling = fold64(&enc[..64], &enc[64..320]);
+            let fh = crypt(&block_key(&rolling, 208), &blob[ENC_HEADER_SIZE..ENC_HEADER_SIZE + FILE_HEADER_SIZE]);
+            let field = |i: usize| u32::from_le_bytes(fh[64 + 4 * i..68 + 4 * i].try_into().unwrap()) as u64;
+            let (data_size, logo_size, desc_size, serial_len) = (field(0), field(1), field(2), field(3));
+            let sizes = [desc_size, logo_size, data_size, serial_len * 2];
+            let total = (ENC_HEADER_SIZE + FILE_HEADER_SIZE) as u64 + sizes.iter().sum::<u64>();
+            (total == blob.len() as u64).then(|| (master_key, enc, rolling, fh, sizes.map(|s| s as usize)))
+        })
+        .ok_or_else(|| {
+            Error::new("The file size doesn't add up; it isn't a PES 2021/FL save or the file is damaged.")
+        })?;
+    let mut pos = ENC_HEADER_SIZE + FILE_HEADER_SIZE;
     let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(4);
     for (index, size) in sizes.iter().enumerate() {
         blocks.push(crypt(&block_key(&rolling, index as u64), &blob[pos..pos + size]));
@@ -208,7 +225,7 @@ pub fn unpack(blob: &[u8], verify: bool) -> Result<SaveFile, Error> {
     let data = blocks.pop().unwrap();
     let logo = blocks.pop().unwrap();
     let desc = blocks.pop().unwrap();
-    Ok(SaveFile { enc_header: enc, file_header: fh, desc, logo, data, serial })
+    Ok(SaveFile { enc_header: enc, file_header: fh, desc, logo, data, serial, master_key })
 }
 
 pub fn pack(save: &SaveFile) -> Vec<u8> {
@@ -217,7 +234,7 @@ pub fn pack(save: &SaveFile) -> Vec<u8> {
         enc[index * 64..(index + 1) * 64].copy_from_slice(&sha512(block));
     }
     let salt: Vec<u8> = enc[256..320].to_vec();
-    let mut out = crypt(&fold64(&salt, &header_key_mask()), &enc);
+    let mut out = crypt(&fold64(&salt, &header_key_mask(save.master_key)), &enc);
     out[256..320].copy_from_slice(&salt);
     let rolling = fold64(&enc[..64], &enc[64..320]);
     out.extend(crypt(&block_key(&rolling, 208), &save.file_header));

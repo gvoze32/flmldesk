@@ -293,7 +293,8 @@ pub fn write_save_as(path: &Path, data: Vec<u8>, version: &str, description: &st
     for (i, b) in enc[256..].iter_mut().enumerate() {
         *b = (i * 37 + 11) as u8;
     }
-    let save = SaveFile { enc_header: enc, file_header: fh, desc, logo, data, serial };
+    let master_key = if version.contains("2027") { &crypto::FL27_KEY } else { &crypto::PES21_KEY };
+    let save = SaveFile { enc_header: enc, file_header: fh, desc, logo, data, serial, master_key };
     std::fs::write(path, crypto::pack(&save)).unwrap();
     path.to_path_buf()
 }
