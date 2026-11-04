@@ -584,7 +584,7 @@ impl App {
     fn fill_finances(&mut self) {
         let Some(game) = &self.game else { return };
         (self.tb, self.sb) = match game.finances() {
-            Ok(f) => (self.to_display(f.transfer_eur), self.to_display(f.salary_eur - game.wage_bill_eur())),
+            Ok(f) => (self.to_display(f.transfer_eur), self.to_display(f.salary_eur - game.committed_wages_eur())),
             Err(_) => Default::default(),
         };
         self.manager = game.manager_name().unwrap_or_default();
@@ -805,7 +805,7 @@ impl App {
             return vec!["The fee isn't a valid amount.".into()];
         };
         let fin = game.finances().ok();
-        let wages = game.wage_bill_eur();
+        let wages = game.committed_wages_eur();
         let mut lines = Vec::new();
         if self.is_loan(Some(mode)) {
             let sign = if mode == Mode::In { -1 } else { 1 };
@@ -933,8 +933,9 @@ impl App {
             return;
         };
         let game = self.game.as_mut().unwrap();
-        // The field holds what the game shows; the save stores it plus the salaries.
-        let sb = sb_left + game.wage_bill_eur();
+        // The field holds what the game shows; the save stores it plus the
+        // salaries, agreed signings included.
+        let sb = sb_left + game.committed_wages_eur();
         let result = game.set_finances(tb, sb).map(|op| op.description.clone());
         self.applied(result);
     }
@@ -1427,13 +1428,17 @@ impl App {
         };
         let club = game.teams[club].name.clone();
         let wages = game.wage_bill_eur();
-        let left = game.finances().ok().map(|f| f.salary_eur - wages);
+        let committed = game.committed_wages_eur();
+        let left = game.finances().ok().map(|f| f.salary_eur - committed);
         let date = game.game_date;
         let expiring = self.squad.iter().filter(|r| Self::is_expiring(r)).count();
         let muted = theme::muted(ui);
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("{club} · {}/40 players", self.squad.len()));
             ui.label(format!("Wages: {}/yr", self.to_display(wages)));
+            if committed != wages {
+                ui.label(format!("Agreed signings: +{}/yr", self.to_display(committed - wages)));
+            }
             if let Some(left) = left {
                 ui.label(format!("Salary budget left (in game): {}", self.to_display(left)));
             }
@@ -1533,7 +1538,7 @@ impl App {
         let name = row.info.name.clone();
         let months_left = row.months_left;
         let ends: Vec<Date> = (1..=5).map(|n| game.contract_end_in(n)).collect();
-        let left = game.finances().ok().map(|f| f.salary_eur - game.wage_bill_eur());
+        let left = game.finances().ok().map(|f| f.salary_eur - game.committed_wages_eur());
         let transfer = game.finances().ok().map(|f| f.transfer_eur);
         let finance_error = game.finance_error.is_some();
         let current = self.to_display(contract.annual_eur() as i64);
@@ -1617,7 +1622,7 @@ impl App {
         let finance_error = game.finance_error.clone();
         let manager_error = game.manager_error.clone();
         let saved = game.finances().ok();
-        let wages = game.wage_bill_eur();
+        let wages = game.committed_wages_eur();
         let has_club = game.managed_team.is_some();
         let symbol = CURRENCIES[self.currency].0.split(' ').next().unwrap_or("EUR").to_string();
         let rate = self.rate();
@@ -1668,7 +1673,7 @@ impl App {
                 if has_club {
                     ui.label(
                         RichText::new(format!(
-                            "The save stores a yearly salary budget of {}; the game shows it minus your club's salaries ({}).",
+                            "The save stores a yearly salary budget of {}; the game shows it minus your club's salaries, agreed signings included ({}).",
                             self.to_display(f.salary_eur),
                             self.to_display(wages)
                         ))

@@ -289,6 +289,16 @@ impl ContractTable {
         self.contracts(data, club).iter().map(|c| c.salary_units as u64).sum()
     }
 
+    /// Salaries the game takes from the salary budget: players under contract
+    /// plus signings agreed but not yet arrived (status 4 rows of the club).
+    pub fn committed_wage_units(&self, data: &[u8], club: usize) -> u64 {
+        self.rows(data)
+            .iter()
+            .filter(|c| matches!(c.status, STATUS_CONTRACTED | STATUS_AGREED) && c.club_index() == club)
+            .map(|c| c.salary_units as u64)
+            .sum()
+    }
+
     pub fn find(&self, data: &[u8], player: &Player) -> Vec<Contract> {
         self.rows(data)
             .into_iter()

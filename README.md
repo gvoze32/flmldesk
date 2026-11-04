@@ -77,7 +77,7 @@ Go to the [Releases](../../releases) page and download
 7. **Budget & manager** tab: the **Finances** box holds both budgets, the
    **Manager** box the manager name; each has its own **Apply** button. Both
    budgets are shown as in the game: the salary budget is what is left after
-   your club's salaries.
+   your club's salaries, including signings agreed but not arrived yet.
 8. **League results** tab: your club's league matches and the league table.
    Play or skip the match in the game first, save and go back to the
    main menu. Then select the played match, set **Your goals** higher than

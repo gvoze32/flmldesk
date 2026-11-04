@@ -152,6 +152,8 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     let mut game = open(&dir);
     let original = game.data.clone();
     let wages = game.wage_bill_eur();
+    // The open negotiation of the fixture costs nothing yet.
+    assert_eq!(game.committed_wages_eur(), wages);
     let target = club_player(7, 2);
     game.transfer(agreed(7, target.player_id)).unwrap();
 
@@ -160,6 +162,8 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     assert!(game.roster(Source::Club(7)).contains(&target));
     assert!(!game.roster(Source::Club(MANAGED)).contains(&target));
     assert_eq!((game.contract_count(), game.wage_bill_eur()), (SQUAD, wages));
+    // His agreed salary already comes off the salary budget left.
+    assert_eq!(game.committed_wages_eur(), wages + 2_500_000);
 
     // Offer ids and contract indexes share one numbering: the squad uses
     // 0..SQUAD and the open negotiation SQUAD (offer) and SQUAD + 1 (contract).
@@ -204,6 +208,7 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     game.transfer(agreed(8, second.player_id)).unwrap();
     assert_eq!(wordsn::<15>(&game.data, offers + 2 * deals::OFFER_RECORD)[0], index + 1);
     assert_eq!(wordsn::<3>(&game.data, deals::PENDING_ARRIVALS + deals::PENDING_ENTRY)[1], second.player_id);
+    assert_eq!(game.committed_wages_eur(), wages + 2 * 2_500_000);
     assert_eq!(&game.data[slot(2)..slot(2) + len], &block(index + 1)[..]);
     // Agreeing again on the same player is refused.
     assert!(game.transfer(agreed(7, target.player_id)).is_err());

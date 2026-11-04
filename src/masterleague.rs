@@ -760,6 +760,15 @@ impl MasterLeague {
         }
     }
 
+    /// Annual wages the game subtracts from the salary budget, in EUR: the
+    /// squad's contracts plus agreed signings that haven't arrived yet.
+    pub fn committed_wages_eur(&self) -> i64 {
+        match (&self.contracts, self.managed_team) {
+            (Some(t), Some(club)) => t.committed_wage_units(&self.data, club) as i64 * SALARY_UNIT as i64,
+            _ => 0,
+        }
+    }
+
     /// Same month/day as the club's existing contracts, `seasons` years after the game date.
     pub fn contract_end_in(&self, seasons: u16) -> Date {
         let year = self.game_date.map(|d| d.year).unwrap_or_else(|| chrono::Datelike::year(&chrono::Local::now()) as u16);
