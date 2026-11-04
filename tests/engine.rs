@@ -228,8 +228,40 @@ fn player_in_a_game_negotiation_is_refused() {
     assert_eq!(game.data, before);
 }
 
+#[test]
+fn deal_agreed_outside_the_window_waits_for_it_to_open_unless_asked_not_to() {
+    let dir = TempDir::new("closed-window");
+    let mut game = open(&dir);
+    game.game_date = Some(date(2025, 10, 10));
+    // (status, arrival) of the n-th agreed contract row and offer.
+    let agreed_on = |game: &MasterLeague, n: usize| {
+        let row = words(&game.data, FIRST_ROW + (SQUAD + n) * RECORD);
+        let offer = wordsn::<15>(&game.data, FIRST_ROW + deals::OFFERS_OFFSET + n * deals::OFFER_RECORD);
+        [(row[2], row[3]), (offer[2], offer[3])]
+    };
+    // By default the deal waits in the negotiations: the player stays at his club.
+    let target = club_player(7, 2);
+    game.transfer(agreed(7, target.player_id)).unwrap();
+    assert!(game.roster(Source::Club(7)).contains(&target));
+    assert!(!game.roster(Source::Club(MANAGED)).contains(&target));
+    assert_eq!(agreed_on(&game, 1), [(4, date(2026, 1, 1).pack()); 2]);
+    // Not waiting: the next day, as inside a window.
+    let now = club_player(8, 1);
+    game.transfer(TransferRequest { wait_for_window: false, ..agreed(8, now.player_id) }).unwrap();
+    assert_eq!(agreed_on(&game, 2), [(4, date(2025, 10, 11).pack()); 2]);
+}
+
 fn loan(club: usize, outgoing: bool, pid: u32, fee: i64, end: fl_ml_desk::contracts::Date) -> LoanRequest {
-    LoanRequest { club, outgoing, player_id: pid, fee_eur: fee, loan_end: end, use_transfer_budget: true, name: None }
+    LoanRequest {
+        club,
+        outgoing,
+        player_id: pid,
+        fee_eur: fee,
+        loan_end: end,
+        use_transfer_budget: true,
+        wait_for_window: true,
+        name: None,
+    }
 }
 
 fn timeline_slot(n: usize) -> usize {
@@ -326,6 +358,23 @@ fn next_day_rolls_over_months_and_years() {
     assert_eq!(date(2025, 8, 31).next_day(), date(2025, 9, 1));
     assert_eq!(date(2025, 12, 31).next_day(), date(2026, 1, 1));
     assert_eq!(date(2028, 2, 28).next_day(), date(2028, 2, 29));
+}
+
+#[test]
+fn arrival_waits_for_the_next_transfer_window() {
+    let cases = [
+        (date(2025, 8, 6), date(2025, 8, 7)),
+        (date(2025, 6, 30), date(2025, 7, 1)),
+        (date(2025, 8, 31), date(2026, 1, 1)),
+        (date(2025, 12, 31), date(2026, 1, 1)),
+        (date(2026, 1, 30), date(2026, 1, 31)),
+        (date(2026, 1, 31), date(2026, 7, 1)),
+        (date(2026, 3, 15), date(2026, 7, 1)),
+    ];
+    for (today, arrival) in cases {
+        assert_eq!(deals::arrival_date(today, true), arrival, "agreed {today}");
+        assert_eq!(deals::arrival_date(today, false), today.next_day(), "agreed {today}, not waiting");
+    }
 }
 
 #[test]
@@ -459,6 +508,46 @@ fn ai_move_takes_the_lowest_free_number_when_his_is_taken() {
     assert_eq!(squad_numbers(&game, 7).last(), Some(&1));
     let r = rec(&game, p);
     assert_eq!((u32_at(r, pdb::R_FROM_CLUB), r[pdb::R_STATE]), (team_ref(5), 4));
+}
+
+#[test]
+fn cancelling_one_change_keeps_the_later_ones() {
+    let (first, second) = (club_player(7, 2), club_player(8, 1));
+    let only_second = {
+        let dir = TempDir::new("cancel-ref");
+        let mut game = open(&dir);
+        game.transfer(agreed(8, second.player_id)).unwrap();
+        (game.data, game.records)
+    };
+    let dir = TempDir::new("cancel");
+    let mut game = open(&dir);
+    game.transfer(agreed(7, first.player_id)).unwrap();
+    game.transfer(agreed(8, second.player_id)).unwrap();
+    let kept = game.operations()[1].to_string();
+    // The later deal is done again on top: same bytes as if only it had been agreed.
+    assert!(game.cancel(0).unwrap().starts_with(&format!("ID {}:", first.player_id)));
+    assert_eq!(game.operations(), [kept.as_str()]);
+    assert!(game.data == only_second.0 && game.records == only_second.1);
+}
+
+#[test]
+fn change_a_later_one_depends_on_is_not_cancelled() {
+    let dir = TempDir::new("cancel-dep");
+    let mut game = open(&dir);
+    let original = (game.data.clone(), game.records.clone());
+    let p = club_player(5, 0);
+    game.transfer(TransferRequest::new(Source::Club(5), 7, p.player_id)).unwrap();
+    game.transfer(TransferRequest::new(Source::Club(7), 8, p.player_id)).unwrap();
+    let (data, records, ops) = (game.data.clone(), game.records.clone(), game.operations().join("\n"));
+    // The second move needs the player at club 7.
+    assert!(game.cancel(0).is_err());
+    assert!(game.data == data && game.records == records);
+    assert_eq!(game.operations().join("\n"), ops);
+    // The last one cancels on its own, then the first.
+    game.cancel(1).unwrap();
+    game.cancel(0).unwrap();
+    assert!(game.operations().is_empty());
+    assert!(game.data == original.0 && game.records == original.1);
 }
 
 #[test]

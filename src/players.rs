@@ -39,7 +39,7 @@ pub struct PlayerInfo {
     pub overall: Option<i64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PlayerCatalog {
     pub players: HashMap<u32, PlayerInfo>,
     pub sources: Vec<String>,
@@ -274,12 +274,6 @@ impl PlayerCatalog {
             self.sources.push(source.to_string());
         }
         count
-    }
-
-    pub fn load_name_list(&mut self, path: &Path) -> Result<usize, Error> {
-        let bytes = std::fs::read(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(self.load_name_list_text(&String::from_utf8_lossy(&bytes), &name))
     }
 }
 

@@ -41,14 +41,23 @@ Go to the [Releases](../../releases) page and download
 1. In the game, save your Master League and **go back to the main menu or close
    the game**.
 2. Open `FLMLDesk-vX.Y.Z-windows-x64.exe`.
-3. Click **Open ML save…**, or drag your save file onto the window. Saves are in
+3. The app starts on **Get started**. Click **Open ML save…**, or drag your
+   save file onto the window. Saves are in
    `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`
    (Football Life 2027: `Documents\SPGAME\Football Life\2027\save\`)
    and are named like `ML00000001`.
-   - The app finds your club and the in-game date by itself.
-4. **Game folder (names/OVR)…** (only once): choose the folder where the game is
-   installed. This fills in the names, positions, ages and OVR of all players.
-5. **Player transfers** tab: search for a player, fill in **Transfer fee**,
+   - The app finds your club and the in-game date by itself; check
+     **Your club** and change it if needed.
+4. **Game folder…**: choose the folder where the game is installed. This fills
+   in the names, positions, ages and OVR of all players.
+5. The EDIT file (`EDIT00000000`, with players you edited in the game) is
+   loaded by itself from your save folder; only if it isn't there does the
+   app ask for it (**Open EDIT file…**). Its names win over the game folder.
+   Then press **Continue →**.
+   - The app remembers the save and the game folder: next time it loads them
+     again and opens the tabs by itself. **Change save / setup…** above the
+     tabs brings this screen back.
+6. **Player transfers** tab: search for a player, fill in **Transfer fee**,
    **Salary per year** and **Contract until** (or click **+1 yr** to **+5 yr**
    from the in-game date), then press **Transfer →** below.
    - You can type amounts like `12,500,000`, `12.5m` or `750k`.
@@ -62,11 +71,17 @@ Go to the [Releases](../../releases) page and download
    - If you pick one of your own players, the app switches to selling.
    - A player you are already negotiating for in the game is refused: finish
      or cancel that negotiation in the game first.
-   - A player without a club (free agent) also arrives the next day; in the
+   - **Wait for transfer window** (ticked by default): a signing or loan
+     agreed while the window is closed (it is open 1 July – 31 August and
+     1–31 January) waits in your negotiations and the player arrives the
+     day the next window opens, as in the game. Untick it, or agree inside
+     a window, and he arrives the next day.
+   - A player without a club (free agent) arrives the same way; in the
      game he only negotiates his salary, so leave the fee at 0.
    - Saves the app can't read the transfer lists of: the player joins your
-     squad right away instead.
-6. **My squad & contracts** tab: your players sorted by contract end; contracts
+     squad right away instead; with the window closed, only if **Wait for
+     transfer window** is unticked.
+7. **My squad & contracts** tab: your players sorted by contract end; contracts
    ending within 12 months are highlighted. Select a player:
    - **Apply contract** sets the new **Salary per year** and **Contract until**
      (**+1 yr** to **+5 yr** from the in-game date).
@@ -74,21 +89,25 @@ Go to the [Releases](../../releases) page and download
      **Remaining salary** fills in what is still owed until the contract ends;
      with **Pay from transfer budget** it is taken from the budget.
    - **Export squad (CSV)…** saves the squad with salaries and contract dates.
-7. **Budget & manager** tab: the **Finances** box holds both budgets, the
+8. **Budget & manager** tab: the **Finances** box holds both budgets, the
    **Manager** box the manager name; each has its own **Apply** button. Both
    budgets are shown as in the game: the salary budget is what is left after
    your club's salaries, including signings agreed but not arrived yet.
-8. **League results** tab: your club's league matches and the league table.
+9. **League results** tab: your club's league matches and the league table.
    Play or skip the match in the game first, save and go back to the
    main menu. Then select the played match, set **Your goals** higher than
    **Opponent's goals** and press **Make it a win**. The score and the table
    (points, wins/draws/losses, goals, positions) change.
-9. Click **Save (with automatic backup)**. A copy of your old save is kept in
-   the `FLMLDesk_backup` folder next to it, just in case.
-10. Load the save in the game and check your squad, finances and league table.
+10. Click **Save**. A copy of your old save is kept in the `FLMLDesk_backup`
+    folder next to it, just in case.
+11. Load the save in the game and check your squad, finances and league table.
 
-You can undo changes one by one before saving. **Currency** only changes how
-amounts are shown and typed; it uses the same exchange rates as the game.
+You can undo changes one by one, cancel any single change with the **✖** next
+to it, or **Cancel all changes**, before saving. A change that a later one
+depends on (for example the move of a player you then moved again) can only
+be cancelled after that later one.
+**Currency** only changes how amounts are shown and typed; it uses the same
+exchange rates as the game.
 
 ## Good to know
 

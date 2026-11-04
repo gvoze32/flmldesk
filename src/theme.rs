@@ -235,6 +235,21 @@ pub fn primary_button(ui: &Ui, text: &str) -> Button<'static> {
         .corner_radius(CornerRadius::same(RADIUS))
 }
 
+/// Red used for removing something.
+pub fn danger(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode { rgb(0xF2, 0x6D, 0x6D) } else { rgb(0xC6, 0x28, 0x28) }
+}
+
+/// Small red ✖ button that removes the item next to it.
+pub fn remove_button(ui: &Ui) -> Button<'static> {
+    let red = danger(ui);
+    Button::new(RichText::new("✖").strong().color(red))
+        .fill(red.gamma_multiply(0.15))
+        .stroke(Stroke::new(1.0, red.gamma_multiply(0.6)))
+        .min_size(vec2(24.0, 22.0))
+        .corner_radius(CornerRadius::same(RADIUS / 2))
+}
+
 /// Plain button with the same size and corners as `primary_button`.
 pub fn secondary_button(text: &str) -> Button<'static> {
     Button::new(text.to_owned()).min_size(vec2(130.0, 34.0)).corner_radius(CornerRadius::same(RADIUS))

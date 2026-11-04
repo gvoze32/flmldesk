@@ -97,6 +97,27 @@ fn window_end(today: Date) -> Date {
     }
 }
 
+/// Whether the game's transfer window is open on `day`: 1 July – 31 August
+/// and 1–31 January (closing dates as in `window_end`).
+pub fn in_window(day: Date) -> bool {
+    matches!(day.month, 1 | 7 | 8)
+}
+
+/// Day an agreed deal completes: the next day, or with `wait_for_window` the
+/// day the next transfer window opens when that is closed. Until then the
+/// deal waits in the negotiations list, as one agreed in the game outside a
+/// window does.
+pub fn arrival_date(today: Date, wait_for_window: bool) -> Date {
+    let next = today.next_day();
+    if !wait_for_window || in_window(next) {
+        next
+    } else if next.month < 7 {
+        Date { year: next.year, month: 7, day: 1 }
+    } else {
+        Date { year: next.year + 1, month: 1, day: 1 }
+    }
+}
+
 fn u32s<const N: usize>(data: &[u8], off: usize) -> Option<[u32; N]> {
     let bytes = data.get(off..off.checked_add(4 * N)?)?;
     Some(core::array::from_fn(|i| u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())))

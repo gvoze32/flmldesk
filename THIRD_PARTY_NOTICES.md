@@ -21,7 +21,8 @@
 - **pes-file-reader** (leo-grayrat) was used as research reference only (money
   unit, club table, integrity chain). No code is included.
 - `data/FL2622wc_players.txt` is the ID/name list shipped with
-  FL26 Transfer Editor v0.5.1. It is embedded in the binary as a fallback name
-  source.
+  FL26 Transfer Editor v0.5.1, and `data/FL2710_players.txt` an ID/name list
+  for Football Life 2027. Both are embedded in the binary as fallback name
+  sources.
 
 This project is not affiliated with Konami or SmokePatch.

@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use eframe::egui::{self, RichText, vec2};
 use egui_extras::{Column, TableBuilder};
 use fl_ml_desk::contracts::{Contract, Date};
-use fl_ml_desk::export;
+use fl_ml_desk::{deals, export};
 use fl_ml_desk::league::{Fixture, MAX_GOALS, Record};
 use fl_ml_desk::masterleague::{LeagueView, LoanRequest, MasterLeague, Player, Source, TransferRequest, fmt_int};
 use fl_ml_desk::players::{PlayerCatalog, PlayerInfo};
@@ -20,7 +20,9 @@ use unicode_normalization::char::is_combining_mark;
 
 use crate::theme::{self, Tone};
 
-const BUNDLED_NAMES: &str = include_str!("../data/FL2622wc_players.txt");
+/// Built-in ID/name lists, the fallback under the game folder and EDIT file.
+const FL26_NAMES: &str = include_str!("../data/FL2622wc_players.txt");
+const FL27_NAMES: &str = include_str!("../data/FL2710_players.txt");
 const SETTINGS_FILE: &str = ".fl-ml-desk.json";
 /// Display currencies use the game's own conversion factors (EUR is the stored base).
 const CURRENCIES: [(&str, f64); 5] = [("EUR €", 1.0), ("GBP £", 0.9), ("CHF", 1.1), ("BRL R$", 4.3), ("JPY ¥", 125.0)];
@@ -43,6 +45,16 @@ fn iso(date: Date) -> String {
 /// The first `day`/`month` on or after `after`.
 fn next_on(after: Date, month: u8, day: u8) -> Date {
     Date::new(after.year, month, day).filter(|d| *d >= after).or_else(|| Date::new(after.year + 1, month, day)).unwrap_or(after)
+}
+
+/// Arrival date of a deal agreed `today`, noting when it waits for the transfer window.
+fn arrival_text(today: Date, wait_for_window: bool) -> String {
+    let day = deals::arrival_date(today, wait_for_window);
+    if day == today.next_day() {
+        day.to_string()
+    } else {
+        format!("{day} (the transfer window is closed until then)")
+    }
 }
 
 fn normal(text: &str) -> String {
@@ -81,6 +93,9 @@ struct Settings {
     game_folder: Option<String>,
     #[serde(default)]
     currency: Option<String>,
+    /// Last opened save, opened again on start.
+    #[serde(default)]
+    last_save: Option<String>,
     /// Managed club per save path.
     #[serde(default)]
     clubs: HashMap<String, usize>,
@@ -102,9 +117,17 @@ impl Settings {
 }
 
 enum Job {
-    Open(Result<(Box<MasterLeague>, Option<(PlayerCatalog, usize)>), Error>),
-    Names(Result<(PlayerCatalog, usize, String), Error>),
+    Open(Result<(Box<MasterLeague>, Option<PlayerCatalog>), Error>),
+    /// Loaded names and the file they came from.
+    Names { from: NameSource, result: Result<(PlayerCatalog, String), Error> },
     Update { manual: bool, result: Result<Option<update::Release>, Error> },
+}
+
+/// Where a batch of player names came from; the game folder and an EDIT file are setup steps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameSource {
+    GameFolder,
+    Edit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -268,6 +291,17 @@ pub struct App {
     busy: usize,
     status: String,
     tab: Tab,
+    /// Setup screen (save, club, names) shown instead of the tabs.
+    setup: bool,
+    /// Leave setup by itself once the remembered save and game folder (with
+    /// the EDIT file next to the save) are loaded again (start with an earlier
+    /// setup only).
+    setup_auto: bool,
+    /// Names, positions, ages and OVR from the game folder.
+    game_names: Option<PlayerCatalog>,
+    /// EDIT file (name, players) next to the save or picked by hand; its
+    /// edited players win over the game folder.
+    edit_names: Option<(String, PlayerCatalog)>,
     currency: usize,
     // club pickers
     club_items: Vec<(String, usize)>,
@@ -293,6 +327,7 @@ pub struct App {
     use_tb: bool,
     loan: bool,
     loan_end: (u16, u8, u8),
+    wait_window: bool,
     // squad tab
     squad: Vec<SquadRow>,
     squad_selected: Option<Player>,
@@ -326,8 +361,10 @@ impl App {
             .as_deref()
             .and_then(|c| CURRENCIES.iter().position(|(n, _)| *n == c))
             .unwrap_or(0);
-        let mut catalog = PlayerCatalog::default();
-        catalog.load_name_list_text(BUNDLED_NAMES, "FL2622wc_players.txt");
+        // Paths remembered from an earlier setup: everything loads again and
+        // the tabs open by themselves.
+        let setup_auto = settings.last_save.is_some();
+        let catalog = bundled_names(false);
         let mut app = App {
             game: None,
             catalog,
@@ -335,8 +372,12 @@ impl App {
             tx,
             rx,
             busy: 0,
-            status: "Open a Master League save (ML000000xx). In the game, save first and go back to the main menu.".into(),
+            status: String::new(),
             tab: Tab::Transfer,
+            setup: true,
+            setup_auto,
+            game_names: None,
+            edit_names: None,
             currency,
             club_items: Vec::new(),
             my_club_filter: String::new(),
@@ -360,6 +401,7 @@ impl App {
             use_tb: true,
             loan: false,
             loan_end: (2026, 6, 30),
+            wait_window: true,
             squad: Vec::new(),
             squad_selected: None,
             expiring_only: false,
@@ -381,7 +423,8 @@ impl App {
             app.load_game_folder(&cc.egui_ctx, PathBuf::from(folder));
         }
         app.check_updates(&cc.egui_ctx, false);
-        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_file()) {
+        let remembered = app.settings.last_save.clone().map(PathBuf::from).filter(|p| p.is_file());
+        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_file()).or(remembered) {
             app.open_path(&cc.egui_ctx, path);
         }
         app
@@ -407,13 +450,15 @@ impl App {
                         Err(e) => self.fail("Couldn't open the save", &e),
                     }
                 }
-                Job::Names(result) => {
+                Job::Names { from, result } => {
                     self.busy -= 1;
                     match result {
-                        Ok((catalog, count, source)) => {
-                            self.catalog.merge(catalog);
-                            self.status = format!("{} players loaded from {source}.", fmt_int(count as i64));
-                            self.results_dirty = true;
+                        Ok((catalog, source)) => {
+                            match from {
+                                NameSource::GameFolder => self.game_names = Some(catalog),
+                                NameSource::Edit => self.edit_names = Some((source, catalog)),
+                            }
+                            self.rebuild_names();
                         }
                         Err(e) => self.fail("Couldn't load player names", &e),
                     }
@@ -448,7 +493,8 @@ impl App {
     fn load_game_folder(&mut self, ctx: &egui::Context, folder: PathBuf) {
         self.spawn(ctx, move || {
             let mut catalog = PlayerCatalog::default();
-            Job::Names(catalog.load_game_folder(&folder).map(|n| (catalog, n, format!("game folder {}", folder.display()))))
+            let result = catalog.load_game_folder(&folder).map(|_| (catalog, folder.display().to_string()));
+            Job::Names { from: NameSource::GameFolder, result }
         });
     }
 
@@ -482,19 +528,18 @@ impl App {
             Job::Open(MasterLeague::open(&path).map(|game| {
                 let edit = path.parent().map(|p| p.join("EDIT00000000")).filter(|p| p.exists()).and_then(|p| {
                     let mut catalog = PlayerCatalog::default();
-                    catalog.load_edit(&p).ok().map(|n| (catalog, n))
+                    catalog.load_edit(&p).ok().map(|_| catalog)
                 });
                 (Box::new(game), edit)
             }))
         });
     }
 
-    fn opened(&mut self, game: MasterLeague, edit: Option<(PlayerCatalog, usize)>) {
+    fn opened(&mut self, game: MasterLeague, edit: Option<PlayerCatalog>) {
         let mut msg = String::from("Save opened.");
-        if let Some((catalog, n)) = edit {
-            self.catalog.merge(catalog);
-            msg += &format!(" Names loaded from EDIT00000000 ({} players).", fmt_int(n as i64));
-        }
+        // The EDIT file sits next to the save; only when it doesn't does setup ask for it.
+        self.edit_names = edit.map(|catalog| ("EDIT00000000".to_string(), catalog));
+        self.rebuild_names();
         for e in [&game.finance_error, &game.manager_error, &game.players_error].into_iter().flatten() {
             msg += &format!(" WARNING: {e}");
         }
@@ -502,7 +547,10 @@ impl App {
             game.teams.iter().map(|t| (format!("{} ({}) #{}", t.name, t.abbr, t.index), t.index)).collect();
         items.sort_by_cached_key(|(l, _)| normal(l));
         self.club_items = items;
-        let remembered = self.settings.clubs.get(&game.path.to_string_lossy().into_owned()).copied();
+        let path = game.path.to_string_lossy().into_owned();
+        let remembered = self.settings.clubs.get(&path).copied();
+        self.settings.last_save = Some(path);
+        self.settings.store();
         let described = game.described_club;
         if let Some(date) = game.game_date {
             msg += &format!(" In-game date: {date}.");
@@ -539,7 +587,7 @@ impl App {
                 let end = game.contract_end_in(3);
                 (self.end_year, self.end_month, self.end_day) = (end.year, end.month, end.day);
                 if let Some(today) = game.game_date {
-                    let end = next_on(today.next_day(), 6, 30);
+                    let end = next_on(deals::arrival_date(today, self.wait_window), 6, 30);
                     self.loan_end = (end.year, end.month, end.day);
                 }
                 self.dest = Some(index);
@@ -692,7 +740,7 @@ impl App {
             return;
         };
         let name = self.catalog.get(player.player_id).name;
-        let result = self.game.as_mut().unwrap().renew_contract(player, salary, end, Some(&name)).map(|op| op.description.clone());
+        let result = self.game.as_mut().unwrap().renew_contract(player, salary, end, Some(&name)).map(|_| ());
         self.applied(result);
     }
 
@@ -714,7 +762,7 @@ impl App {
         }
         let use_tb = self.release_use_tb;
         let result =
-            self.game.as_mut().unwrap().release(player, compensation, use_tb, Some(&name)).map(|op| op.description.clone());
+            self.game.as_mut().unwrap().release(player, compensation, use_tb, Some(&name)).map(|_| ());
         self.applied(result);
     }
 
@@ -816,8 +864,11 @@ impl App {
                     self.to_display(f.transfer_eur + sign * fee)
                 ));
             }
-            if let Some(day) = game.game_date.map(|d| d.next_day()) {
-                lines.push(format!("Loan agreed now: the game moves the player on {day}. His contract stays with the club that loans him out."));
+            if let Some(today) = game.game_date {
+                lines.push(format!(
+                    "Loan agreed now: the game moves the player on {}. His contract stays with the club that loans him out.",
+                    arrival_text(today, self.wait_window)
+                ));
             }
             lines.push("The game stores no wage for a loan, so there is nothing to enter. Loans haven't been tested in the game yet.".into());
         } else if mode == Mode::In {
@@ -831,9 +882,10 @@ impl App {
                     Err(()) => format!("Salary budget left (in game): {}", self.to_display(left)),
                 });
             }
-            if let Some(day) = game.game_date.map(|d| d.next_day()) {
+            if let Some(today) = game.game_date {
                 lines.push(format!(
-                    "Deal agreed now: the player joins on {day}, when the game moves him. Until then he shows in your negotiations."
+                    "Deal agreed now: the player joins on {}, when the game moves him. Until then he shows in your negotiations.",
+                    arrival_text(today, self.wait_window)
                 ));
             }
             if matches!(self.selected, Some((Source::Others, _))) && fee != 0 {
@@ -867,6 +919,7 @@ impl App {
         }
         let mut req = TransferRequest {
             use_transfer_budget: self.use_tb,
+            wait_for_window: self.wait_window,
             name: Some(info.name.clone()),
             ..TransferRequest::new(source, dest, player.player_id)
         };
@@ -886,8 +939,8 @@ impl App {
         }
         let game = self.game.as_mut().unwrap();
         match game.transfer(req) {
-            Ok(op) => {
-                self.status = format!("Added: {}  — press Save to write it to the file.", op.description);
+            Ok(_) => {
+                self.status.clear();
                 self.after_change();
             }
             Err(e) => error_dialog("Transfer cancelled", &e.to_string()),
@@ -915,11 +968,12 @@ impl App {
             fee_eur: fee,
             loan_end,
             use_transfer_budget: self.use_tb,
+            wait_for_window: self.wait_window,
             name: Some(name),
         };
         match self.game.as_mut().unwrap().loan(req) {
-            Ok(op) => {
-                self.status = format!("Added: {}  — press Save to write it to the file.", op.description);
+            Ok(_) => {
+                self.status.clear();
                 self.after_change();
             }
             Err(e) => error_dialog("Loan cancelled", &e.to_string()),
@@ -936,7 +990,7 @@ impl App {
         // The field holds what the game shows; the save stores it plus the
         // salaries, agreed signings included.
         let sb = sb_left + game.committed_wages_eur();
-        let result = game.set_finances(tb, sb).map(|op| op.description.clone());
+        let result = game.set_finances(tb, sb).map(|_| ());
         self.applied(result);
     }
 
@@ -967,20 +1021,20 @@ impl App {
     fn make_win(&mut self) {
         let Some(index) = self.league_selected else { return };
         let (ours, theirs) = self.win_score;
-        let result = self.game.as_mut().unwrap().set_league_win(index, ours, theirs).map(|op| op.description.clone());
+        let result = self.game.as_mut().unwrap().set_league_win(index, ours, theirs).map(|_| ());
         self.applied(result);
     }
 
     fn apply_manager(&mut self) {
         let manager = self.manager.clone();
-        let result = self.game.as_mut().unwrap().set_manager_name(&manager).map(|op| op.description.clone());
+        let result = self.game.as_mut().unwrap().set_manager_name(&manager).map(|_| ());
         self.applied(result);
     }
 
-    fn applied(&mut self, result: Result<String, Error>) {
+    fn applied(&mut self, result: Result<(), Error>) {
         match result {
-            Ok(description) => {
-                self.status = description;
+            Ok(_) => {
+                self.status.clear();
                 self.after_change();
             }
             Err(e) => error_dialog("Couldn't do that", &e.to_string()),
@@ -1026,102 +1080,215 @@ impl App {
         }
     }
 
-    fn save_card(&mut self, ui: &mut egui::Ui) {
+    /// The tabs need an opened save and the managed club.
+    fn ready(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| g.managed_team.is_some())
+    }
+
+    fn currency_combo(&mut self, ui: &mut egui::Ui) {
+        ui.label("Currency:");
+        let before = self.currency;
+        egui::ComboBox::from_id_salt("currency")
+            .selected_text(CURRENCIES[self.currency].0)
+            .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
+        if before != self.currency {
+            self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
+            self.settings.store();
+            self.fill_finances();
+            self.results_dirty = true;
+        }
+    }
+
+    fn pick_game_folder(&mut self, ctx: &egui::Context) {
+        if let Some(folder) = FileDialog::new().set_title("Choose the game folder (the one with the download folder)").pick_folder() {
+            self.settings.game_folder = Some(folder.to_string_lossy().into_owned());
+            self.settings.store();
+            self.load_game_folder(ctx, folder);
+        }
+    }
+
+    fn open_edit(&mut self, ctx: &egui::Context) {
+        let Some(path) = FileDialog::new().set_title("EDIT file (EDIT00000000, in the save folder)").pick_file() else { return };
+        self.spawn(ctx, move || {
+            let mut catalog = PlayerCatalog::default();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            Job::Names { from: NameSource::Edit, result: catalog.load_edit(&path).map(|_| (catalog, name)) }
+        });
+    }
+
+    /// Rebuild the names in a fixed order, whichever source finished loading first.
+    fn rebuild_names(&mut self) {
+        let fl27 = self.game.as_ref().is_some_and(|g| g.is_fl27());
+        self.catalog = layered_names(fl27, self.game_names.as_ref(), self.edit_names.as_ref().map(|(_, c)| c));
+        self.results_dirty = true;
+    }
+
+    /// Every setup step is done: the save with its club, the game folder and the EDIT file.
+    fn setup_done(&self) -> bool {
+        self.ready() && self.game_names.is_some() && self.edit_names.is_some()
+    }
+
+    /// First screen: the save (with its club, filled in from the save), the
+    /// game folder and the EDIT file are needed before the tabs open.
+    fn setup_screen(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        theme::card(ui, |ui| {
-            // Wrapped rows: on a narrow window or with Windows scaling the items
-            // move to the next line instead of drawing over each other.
-            ui.horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(self.busy == 0, |ui| {
-                    let open = if self.game.is_none() {
-                        theme::primary_button(ui, "Open ML save…")
-                    } else {
-                        egui::Button::new("Open another save…")
-                    };
-                    if ui.add(open).clicked() {
-                        self.open_save(&ctx);
-                    }
-                });
-                if ui.button("Game folder (names/OVR)…").clicked()
-                    && let Some(folder) = FileDialog::new().set_title("Choose the game folder (the one with the download folder)").pick_folder()
-                {
-                    self.settings.game_folder = Some(folder.to_string_lossy().into_owned());
-                    self.settings.store();
-                    self.load_game_folder(&ctx, folder);
-                }
-                if ui.button("Import names / EDIT…").clicked()
-                    && let Some(path) = FileDialog::new().set_title("Name list (TXT/CSV) or EDIT00000000").pick_file()
-                {
-                    self.spawn(&ctx, move || {
-                        let mut catalog = PlayerCatalog::default();
-                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        let result = if name.to_uppercase().starts_with("EDIT") {
-                            catalog.load_edit(&path)
-                        } else {
-                            catalog.load_name_list(&path)
-                        };
-                        Job::Names(result.map(|n| (catalog, n, name)))
-                    });
-                }
-                ui.add_space(12.0);
-                ui.label("Currency:");
-                let before = self.currency;
-                egui::ComboBox::from_id_salt("currency")
-                    .selected_text(CURRENCIES[self.currency].0)
-                    .show_index(ui, &mut self.currency, CURRENCIES.len(), |i| CURRENCIES[i].0);
-                if before != self.currency {
-                    self.settings.currency = Some(CURRENCIES[self.currency].0.to_string());
-                    self.settings.store();
-                    self.fill_finances();
-                    self.results_dirty = true;
-                }
-            });
-            let muted = theme::muted(ui);
-            // One source per game file (data_*.cpk …): show the count, list them in the tooltip.
-            let sources = &self.catalog.sources;
-            let names = match sources.len() {
-                0 => format!("Player names: {} (built-in list not loaded)", fmt_int(self.catalog.players.len() as i64)),
-                1 => format!("Player names: {} from {}", fmt_int(self.catalog.players.len() as i64), sources[0]),
-                n => format!("Player names: {} from {n} files", fmt_int(self.catalog.players.len() as i64)),
-            };
-            let names_tip = sources.join("\n");
-            // The file name only; the full path (long on Windows) is in the tooltip.
-            let row = ui.horizontal_wrapped(|ui| {
-                match &self.game {
-                    Some(g) => {
-                        let file = g.path.file_name().unwrap_or_default().to_string_lossy();
-                        theme::chip(ui, Tone::Ok, format!("{file}  ·  {}  ·  {} clubs", g.game, g.teams.len()));
-                    }
-                    None => {
-                        ui.label(RichText::new("No save opened yet. You can also drop the file on this window.").color(muted));
-                    }
-                }
-                let label = ui.label(RichText::new(names).small().color(muted));
-                if !names_tip.is_empty() {
-                    label.on_hover_text(names_tip);
-                }
-            });
-            if let Some(g) = &self.game {
-                row.response.on_hover_text(g.path.display().to_string());
-            }
-            if self.game.is_some() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong("Your club:");
-                    let mine = self.game.as_ref().unwrap().managed_team;
-                    let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
-                    let items = self.club_items.clone();
-                    if let Some(index) = search_combo(ui, "my_club", 360.0, &text, &mut self.my_club_filter, &items) {
-                        self.set_managed_club(index);
-                    }
-                    if let Some(i) = self.game.as_ref().unwrap().managed_team {
-                        let g = self.game.as_ref().unwrap();
+        let muted = theme::muted(ui);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let width = ui.available_width().min(760.0);
+            ui.horizontal_top(|ui| {
+                ui.add_space((ui.available_width() - width) / 2.0);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Get started").heading().strong());
+                    ui.label(
+                        RichText::new("Do these steps once: the app remembers them and next time opens the editor by itself.")
+                            .color(muted),
+                    );
+                    ui.add_space(8.0);
+
+                    theme::card(ui, |ui| {
+                        step_title(ui, 1, "Open your Master League save", Some(self.ready() && self.edit_names.is_some()));
                         ui.label(
-                            RichText::new(format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count()))
-                                .color(muted),
+                            RichText::new(
+                                "In the game, save first and go back to the main menu. Saves are named like ML00000001; \
+                                 you can also drop the file on this window.",
+                            )
+                            .color(muted),
                         );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_enabled_ui(self.busy == 0, |ui| {
+                                let open = if self.game.is_none() {
+                                    theme::primary_button(ui, "Open ML save…")
+                                } else {
+                                    theme::secondary_button("Open another save…")
+                                };
+                                if ui.add(open).clicked() {
+                                    self.open_save(&ctx);
+                                }
+                            });
+                            if let Some(g) = &self.game {
+                                let file = g.path.file_name().unwrap_or_default().to_string_lossy();
+                                let (text, path) = (format!("{file}  ·  {}", g.game), g.path.display().to_string());
+                                ui.horizontal(|ui| theme::chip(ui, Tone::Ok, text)).response.on_hover_text(path);
+                            }
+                        });
+                        // The club comes from the save description (or the last
+                        // choice for this file); it only needs choosing when not found.
+                        if self.game.is_some() {
+                            let mine = self.game.as_ref().and_then(|g| g.managed_team);
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong("Your club:");
+                                let text = mine.map(|i| self.club_label(i)).unwrap_or_else(|| "— choose —".into());
+                                let items = self.club_items.clone();
+                                if let Some(index) = search_combo(ui, "my_club", 360.0, &text, &mut self.my_club_filter, &items) {
+                                    self.set_managed_club(index);
+                                }
+                                if let (Some(g), Some(i)) = (&self.game, mine) {
+                                    let counts = format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count());
+                                    ui.label(RichText::new(counts).color(muted));
+                                }
+                            });
+                            if mine.is_none() {
+                                theme::chip(ui, Tone::Warn, "Your club wasn't found in the save; choose it.");
+                            }
+                            if !self.club_info.is_empty() {
+                                ui.label(RichText::new(&self.club_info).color(muted));
+                            }
+                            // The EDIT file is found next to the save; asked for only when it isn't.
+                            ui.horizontal_wrapped(|ui| match &self.edit_names {
+                                Some((name, _)) => theme::chip(ui, Tone::Ok, format!("{name} found next to the save")),
+                                None => {
+                                    theme::chip(ui, Tone::Warn, "EDIT00000000 wasn't found next to the save; choose it.");
+                                    if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Open EDIT file…")).clicked() {
+                                        self.open_edit(&ctx);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(8.0);
+
+                    theme::card(ui, |ui| {
+                        step_title(ui, 2, "Choose the game folder", Some(self.game_names.is_some()));
+                        ui.label(
+                            RichText::new(
+                                "The folder where the game is installed (the one with the download folder). It fills in the \
+                                 names, positions, ages and OVR of all players. Remembered for next time.",
+                            )
+                            .color(muted),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            let pick = if self.game_names.is_some() {
+                                theme::secondary_button("Change game folder…")
+                            } else {
+                                theme::primary_button(ui, "Game folder…")
+                            };
+                            if ui.add_enabled(self.busy == 0, pick).clicked() {
+                                self.pick_game_folder(&ctx);
+                            }
+                            if let Some(folder) = self.settings.game_folder.as_deref().filter(|_| self.game_names.is_some()) {
+                                theme::chip(ui, Tone::Ok, folder);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| self.currency_combo(ui));
+                    });
+                    ui.add_space(12.0);
+
+                    ui.horizontal(|ui| {
+                        let done = self.setup_done();
+                        if ui.add_enabled(done, theme::primary_button(ui, "Continue →")).clicked() {
+                            self.setup = false;
+                        }
+                        if !done {
+                            let hint = if self.game.is_none() {
+                                "Open a save first."
+                            } else if !self.ready() {
+                                "Choose your club first."
+                            } else if self.edit_names.is_none() {
+                                "Open the EDIT file first."
+                            } else {
+                                "Choose the game folder first."
+                            };
+                            ui.label(RichText::new(hint).color(muted));
+                        }
+                    });
+                    if !self.status.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.status).color(muted));
                     }
-                    ui.label(RichText::new(&self.club_info).color(muted));
                 });
+            });
+        });
+    }
+
+    /// One line above the tabs: the opened save and club, with the way back to setup.
+    fn save_bar(&mut self, ui: &mut egui::Ui) {
+        let muted = theme::muted(ui);
+        theme::card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(g) = &self.game {
+                    let file = g.path.file_name().unwrap_or_default().to_string_lossy();
+                    let (text, path) = (format!("{file}  ·  {}", g.game), g.path.display().to_string());
+                    ui.horizontal(|ui| theme::chip(ui, Tone::Ok, text)).response.on_hover_text(path);
+                    if let Some(i) = g.managed_team {
+                        ui.add_space(8.0);
+                        ui.strong(self.club_label(i));
+                        let counts = format!("{}/40 players · {} contracts", g.roster(Source::Club(i)).len(), g.contract_count());
+                        ui.label(RichText::new(counts).color(muted));
+                    }
+                }
+                ui.add_space(8.0);
+                self.currency_combo(ui);
+                ui.add_space(8.0);
+                if ui.button("Change save / setup…").clicked() {
+                    (self.setup, self.setup_auto) = (true, false);
+                }
+            });
+            if !self.club_info.is_empty() {
+                ui.label(RichText::new(&self.club_info).color(muted));
             }
         });
     }
@@ -1155,6 +1322,14 @@ impl App {
                 }
                 self.after_change();
             }
+            if ui.add_enabled(pending, egui::Button::new("✖ Cancel all changes")).clicked()
+                && confirm("Cancel changes", "Discard all unsaved changes? The save file is not touched.")
+            {
+                let game = self.game.as_mut().unwrap();
+                while game.undo().is_ok() {}
+                self.status = "All unsaved changes cancelled.".into();
+                self.after_change();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_enabled(pending, theme::secondary_button("Save as…")).clicked()
                     && let Some(path) = FileDialog::new()
@@ -1164,7 +1339,7 @@ impl App {
                 {
                     self.save(Some(path));
                 }
-                if ui.add_enabled(pending, theme::primary_button(ui, "Save (with automatic backup)")).clicked() {
+                if ui.add_enabled(pending, theme::primary_button(ui, "Save")).clicked() {
                     let name = self.game.as_ref().unwrap().path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                     if confirm(
                         "Save",
@@ -1178,13 +1353,26 @@ impl App {
                 }
             });
         });
+        let mut cancel = None;
         egui::ScrollArea::vertical().max_height(70.0).id_salt("ops").show(ui, |ui| {
             if let Some(g) = &self.game {
-                for op in g.operations() {
-                    ui.label(op);
+                for (index, op) in g.operations().into_iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.add(theme::remove_button(ui)).on_hover_text("Cancel this change").clicked() {
+                            cancel = Some(index);
+                        }
+                        ui.label(op);
+                    });
                 }
             }
         });
+        if let Some(index) = cancel {
+            match self.game.as_mut().unwrap().cancel(index) {
+                Ok(text) => self.status = format!("Cancelled: {text}"),
+                Err(e) => error_dialog("Couldn't cancel", &e.to_string()),
+            }
+            self.after_change();
+        }
         ui.label(RichText::new(&self.status).color(theme::muted(ui)));
         ui.add_space(2.0);
     }
@@ -1342,7 +1530,8 @@ impl App {
         let ends: Vec<Date> = (1..=5).map(|n| game.contract_end_in(n)).collect();
         let loan_ends: Vec<(&str, Date)> = game
             .game_date
-            .map(|t| vec![("31 Dec", next_on(t.next_day(), 12, 31)), ("30 Jun", next_on(t.next_day(), 6, 30))])
+            .map(|t| deals::arrival_date(t, self.wait_window))
+            .map(|a| vec![("31 Dec", next_on(a, 12, 31)), ("30 Jun", next_on(a, 6, 30))])
             .unwrap_or_default();
         let loan_possible = matches!(mode, Some(Mode::In | Mode::Out)) && !matches!(self.selected, Some((Source::Others, _)));
         let loan = self.is_loan(mode);
@@ -1404,6 +1593,12 @@ impl App {
         });
         ui.horizontal(|ui| {
             ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
+            ui.add_enabled_ui(loan || incoming, |ui| ui.checkbox(&mut self.wait_window, "Wait for transfer window"))
+                .response
+                .on_hover_text(
+                    "Ticked: while the window is closed the deal waits in your negotiations and the player arrives \
+                     when the next window opens (1 July or 1 January), as in the game. Unticked: he arrives the next day.",
+                );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can = self.busy == 0 && mode.is_some();
                 if ui.add_enabled(can, theme::primary_button(ui, if loan { "Loan →" } else { "Transfer →" })).clicked() {
@@ -1906,6 +2101,41 @@ impl App {
     }
 }
 
+/// Numbered setup step: done/required for a needed step (`Some`), optional otherwise.
+fn step_title(ui: &mut egui::Ui, number: usize, title: &str, done: Option<bool>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{number}. {title}")).strong().size(16.0));
+        match done {
+            Some(true) => theme::chip(ui, Tone::Ok, "Done"),
+            Some(false) => theme::chip(ui, Tone::Warn, "Required"),
+            None => {
+                ui.label(RichText::new("Optional").color(theme::muted(ui)));
+            }
+        }
+    });
+}
+
+/// The built-in name lists, the opened game's list on top (the other one
+/// fills in players it lacks). Names only.
+fn bundled_names(fl27: bool) -> PlayerCatalog {
+    let (fl26, fl27_list) = ((FL26_NAMES, "FL2622wc_players.txt"), (FL27_NAMES, "FL2710_players.txt"));
+    let order = if fl27 { [fl26, fl27_list] } else { [fl27_list, fl26] };
+    let mut catalog = PlayerCatalog::default();
+    for (text, source) in order {
+        catalog.load_name_list_text(text, source);
+    }
+    catalog
+}
+
+/// Built-in names, then the game folder, then the EDIT file (edited players win).
+fn layered_names(fl27: bool, game: Option<&PlayerCatalog>, edit: Option<&PlayerCatalog>) -> PlayerCatalog {
+    let mut catalog = bundled_names(fl27);
+    for layer in [game, edit].into_iter().flatten() {
+        catalog.merge(layer.clone());
+    }
+    catalog
+}
+
 /// The window icon, shown again in the header.
 fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
     let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG).expect("bundled icon is a valid PNG");
@@ -1926,19 +2156,35 @@ impl eframe::App for App {
         if self.results_dirty {
             self.refresh_results();
         }
+        if self.setup && self.setup_auto && self.setup_done() {
+            (self.setup, self.setup_auto) = (false, false);
+        }
+        let setup = self.setup || !self.ready();
+        let pending = self.game.as_ref().is_some_and(|g| !g.history.is_empty());
         egui::Panel::top("top").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| {
             self.header(ui);
-            ui.add_space(6.0);
-            self.save_card(ui);
-            ui.add_space(6.0);
-            self.tabs(ui);
+            if !setup {
+                ui.add_space(6.0);
+                self.save_bar(ui);
+                ui.add_space(6.0);
+                self.tabs(ui);
+            }
         });
-        egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 6))).show(ui, |ui| self.bottom_bar(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 4))).show(ui, |ui| match self.tab {
-            Tab::Transfer => self.transfer_tab(ui),
-            Tab::Squad => self.squad_tab(ui),
-            Tab::Budget => self.budget_tab(ui),
-            Tab::League => self.league_tab(ui),
+        // Changes made before going back to setup can still be saved there.
+        if !setup || pending {
+            egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 6))).show(ui, |ui| self.bottom_bar(ui));
+        }
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 4))).show(ui, |ui| {
+            if setup {
+                self.setup_screen(ui);
+                return;
+            }
+            match self.tab {
+                Tab::Transfer => self.transfer_tab(ui),
+                Tab::Squad => self.squad_tab(ui),
+                Tab::Budget => self.budget_tab(ui),
+                Tab::League => self.league_tab(ui),
+            }
         });
     }
 }
@@ -1946,6 +2192,18 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_players_win_over_the_game_folder() {
+        let info = |name: &str, overall| PlayerInfo { player_id: 1, name: name.into(), position: None, age: None, overall };
+        let mut game = PlayerCatalog::default();
+        game.players.insert(1, info("Game Name", Some(80)));
+        let mut edit = PlayerCatalog::default();
+        edit.players.insert(1, info("Edited Name", None));
+        let names = layered_names(false, Some(&game), Some(&edit));
+        assert_eq!(names.get(1), info("Edited Name", Some(80)));
+        assert_eq!(layered_names(false, Some(&game), None).get(1).name, "Game Name");
+    }
 
     #[test]
     fn amounts_accept_grouped_and_short_forms() {

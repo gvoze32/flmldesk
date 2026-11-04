@@ -38,7 +38,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED};
-use crate::deals::{AgreedDeal, DealTables, LoanDeal};
+use crate::deals::{self, AgreedDeal, DealTables, LoanDeal};
 use crate::league::{Fixture, League, Standing};
 use crate::playerdb::{self, Move, PlayerDb};
 use crate::{Error, crypto};
@@ -115,13 +115,26 @@ pub struct LeagueView {
     pub standings: Vec<Standing>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Operation {
     pub description: String,
+    /// The request that made it, to do it again after cancelling an earlier change.
+    redo: Redo,
     /// (offset, previous bytes) in write order.
     patches: Vec<(usize, Vec<u8>)>,
     /// Same for the player records.
     record_patches: Vec<(usize, Vec<u8>)>,
+}
+
+#[derive(Clone, Debug)]
+enum Redo {
+    Transfer(TransferRequest),
+    Loan(LoanRequest),
+    Renew { player: Player, salary_eur: i64, end: Date, name: Option<String> },
+    Release { player: Player, compensation_eur: i64, use_transfer_budget: bool, name: Option<String> },
+    Finances { transfer_eur: i64, salary_eur: i64 },
+    Manager(String),
+    LeagueWin { index: usize, our_goals: u8, their_goals: u8 },
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +147,9 @@ pub struct TransferRequest {
     pub contract_end: Option<Date>,
     /// Charge (incoming) or credit (outgoing) the fee to the transfer budget.
     pub use_transfer_budget: bool,
+    /// An incoming deal waits for the next transfer window when it is closed;
+    /// otherwise the player arrives the next day.
+    pub wait_for_window: bool,
     pub name: Option<String>,
 }
 
@@ -147,6 +163,7 @@ impl TransferRequest {
             salary_eur: None,
             contract_end: None,
             use_transfer_budget: true,
+            wait_for_window: true,
             name: None,
         }
     }
@@ -164,6 +181,9 @@ pub struct LoanRequest {
     pub loan_end: Date,
     /// Charge (loan in) or credit (loan out) the fee to the transfer budget.
     pub use_transfer_budget: bool,
+    /// The loan waits for the next transfer window when it is closed;
+    /// otherwise the player moves the next day.
+    pub wait_for_window: bool,
     pub name: Option<String>,
 }
 
@@ -303,6 +323,11 @@ impl MasterLeague {
                 ));
             }
         }
+    }
+
+    /// Football Life 2027 save (encrypted with its own master key).
+    pub fn is_fl27(&self) -> bool {
+        self.save.master_key == &crypto::FL27_KEY
     }
 
     /// `"Chelsea FC / Premier League\n6/8/2025\nPremier League"` at desc+0x80.
@@ -507,8 +532,8 @@ impl MasterLeague {
         }
     }
 
-    fn begin(&mut self) {
-        self.current = Some(Operation::default());
+    fn begin(&mut self, redo: Redo) {
+        self.current = Some(Operation { description: String::new(), redo, patches: Vec::new(), record_patches: Vec::new() });
     }
 
     fn commit(&mut self, description: String) -> &Operation {
@@ -525,11 +550,11 @@ impl MasterLeague {
     }
 
     /// Run `body` as one journaled operation; any error restores the previous bytes.
-    fn atomic<F>(&mut self, body: F) -> Result<&Operation, Error>
+    fn atomic<F>(&mut self, redo: Redo, body: F) -> Result<&Operation, Error>
     where
         F: FnOnce(&mut Self) -> Result<String, Error>,
     {
-        self.begin();
+        self.begin(redo);
         match body(self) {
             Ok(description) => Ok(self.commit(description)),
             Err(e) => {
@@ -543,6 +568,66 @@ impl MasterLeague {
         let op = self.history.pop().ok_or_else(|| Error::new("Nothing to undo."))?;
         self.revert(&op);
         Ok(op.description)
+    }
+
+    /// Cancel the `index`-th unsaved change and keep the later ones: undo back
+    /// to it, then do the later ones again on top. If one of them no longer
+    /// works without it (for example a sale of the player it signed), nothing
+    /// changes.
+    pub fn cancel(&mut self, index: usize) -> Result<String, Error> {
+        if index >= self.history.len() {
+            return Err(Error::new("That change no longer exists."));
+        }
+        let before = (self.data.clone(), self.records.clone(), self.history.clone());
+        let later = self.history.split_off(index + 1);
+        let target = self.history.pop().unwrap();
+        for op in later.iter().rev() {
+            self.revert(op);
+        }
+        self.revert(&target);
+        for op in &later {
+            if let Err(e) = self.replay(&op.redo) {
+                (self.data, self.records, self.history) = before;
+                return Err(Error::new(format!(
+                    "\"{}\" can't be cancelled on its own: the later change \"{}\" depends on it ({e}). Cancel that one first.",
+                    target.description, op.description
+                )));
+            }
+        }
+        Ok(target.description)
+    }
+
+    /// Do a change again from its request. A contract, budget or manager name
+    /// that is already as requested needs no change.
+    fn replay(&mut self, redo: &Redo) -> Result<(), Error> {
+        match redo.clone() {
+            Redo::Transfer(req) => self.transfer(req).map(|_| ()),
+            Redo::Loan(req) => self.loan(req).map(|_| ()),
+            Redo::Renew { player, salary_eur, end, name } => {
+                let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).ok();
+                if self.contract_of(&player).is_some_and(|c| Some(c.salary_units) == units && c.end == end) {
+                    return Ok(());
+                }
+                self.renew_contract(player, salary_eur, end, name.as_deref()).map(|_| ())
+            }
+            Redo::Release { player, compensation_eur, use_transfer_budget, name } => {
+                self.release(player, compensation_eur, use_transfer_budget, name.as_deref()).map(|_| ())
+            }
+            Redo::Finances { transfer_eur, salary_eur } => {
+                let now = self.finances()?;
+                if (now.transfer_eur, now.salary_eur) == (transfer_eur, salary_eur) {
+                    return Ok(());
+                }
+                self.set_finances(transfer_eur, salary_eur).map(|_| ())
+            }
+            Redo::Manager(name) => {
+                if self.manager_name()? == name {
+                    return Ok(());
+                }
+                self.set_manager_name(&name).map(|_| ())
+            }
+            Redo::LeagueWin { index, our_goals, their_goals } => self.set_league_win(index, our_goals, their_goals).map(|_| ()),
+        }
     }
 
     pub fn operations(&self) -> Vec<&str> {
@@ -670,7 +755,7 @@ impl MasterLeague {
         if transfer_eur == before.transfer_eur && salary_eur == before.salary_eur {
             return Err(Error::new("Nothing was changed."));
         }
-        self.atomic(move |g| {
+        self.atomic(Redo::Finances { transfer_eur, salary_eur }, move |g| {
             let mut changes = Vec::new();
             if transfer_eur != before.transfer_eur {
                 g.set_u32(off, eur_to_units(transfer_eur), "Transfer budget")?;
@@ -708,7 +793,7 @@ impl MasterLeague {
             return Err(Error::new("Nothing was changed."));
         }
         let name = name.to_string();
-        self.atomic(move |g| {
+        self.atomic(Redo::Manager(name.clone()), move |g| {
             let mut bytes = name.as_bytes().to_vec();
             bytes.resize(MANAGER_NAME_SIZE, 0);
             g.patch(MANAGER_NAME, &bytes);
@@ -843,7 +928,7 @@ impl MasterLeague {
         }
         let label = req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id));
         let header = format!("{label}: {} → {}", self.source_name(req.source), self.teams[req.dest].name);
-        self.atomic(move |g| {
+        self.atomic(Redo::Transfer(req.clone()), move |g| {
             let mut parts = vec![header];
             let mut new_contract = None;
             if outgoing {
@@ -866,11 +951,13 @@ impl MasterLeague {
                 let value = u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0);
                 let salary = fmt_eur(units as i64 * SALARY_UNIT as i64);
                 let table = g.contracts.clone().unwrap();
-                // An agreed deal: the game moves the player on the next day.
-                // Saves whose transfer lists aren't recognised join right away.
+                // An agreed deal: the game moves the player on the next day,
+                // or (when asked to wait) when the next transfer window opens.
+                // Saves whose transfer lists aren't recognised join right away,
+                // and refuse a closed window when asked to wait.
                 match DealTables::locate(&g.data, &table) {
                     Ok(tables) => {
-                        let arrival = today.next_day();
+                        let arrival = deals::arrival_date(today, req.wait_for_window);
                         let deal = AgreedDeal {
                             player,
                             buyer_ref: table.team_ref,
@@ -893,6 +980,12 @@ impl MasterLeague {
                         }
                         parts.push(format!("deal agreed, arrives {arrival}; salary {salary}/yr until {end}"));
                         return Ok(parts.join("; "));
+                    }
+                    Err(_) if req.wait_for_window && !deals::in_window(today) => {
+                        return Err(Error::new(
+                            "The transfer window is closed and this save's transfer lists weren't recognised, so the \
+                             signing can't wait for the window. Untick \"Wait for transfer window\" to sign him now.",
+                        ));
                     }
                     Err(_) => {
                         let (offset, record) = table.signing(&g.data, &player, units, value, end, today)?;
@@ -943,11 +1036,11 @@ impl MasterLeague {
         Ok((club, table, today))
     }
 
-    /// Refuses a player the game already has an agreed deal for (a sale or loan waiting for the next day).
+    /// Refuses a player the game already has an agreed deal for (a sale or loan waiting for its arrival date).
     fn refuse_agreed_deal(&self, table: &ContractTable, player: &Player) -> Result<(), Error> {
         match DealTables::locate(&self.data, table) {
             Ok(tables) if tables.has_agreed_offer(&self.data, player) => Err(Error::new(format!(
-                "Player ID {} already has an agreed deal (for example a loan) that the game completes on the next day.",
+                "Player ID {} already has an agreed deal (for example a loan) that the game completes on its arrival date.",
                 player.player_id
             ))),
             _ => Ok(()),
@@ -955,7 +1048,8 @@ impl MasterLeague {
     }
 
     /// Agree a loan to or from the managed club. As in the game, the fee is
-    /// paid (or received) now and the player moves on the next in-game day;
+    /// paid (or received) now and the player moves on the next in-game day,
+    /// or when the next transfer window opens if the request waits for it;
     /// his contract stays with the club that loans him out.
     pub fn loan(&mut self, req: LoanRequest) -> Result<&Operation, Error> {
         let (mine, table, today) = self.contract_context()?;
@@ -998,7 +1092,7 @@ impl MasterLeague {
         }
         let tables = DealTables::locate(&self.data, &table)?;
         let club_ref = |i: usize| if i == mine { table.team_ref } else { u32_at(&self.data, Self::base(i)) };
-        let arrival = today.next_day();
+        let arrival = deals::arrival_date(today, req.wait_for_window);
         let deal = LoanDeal {
             player,
             buyer_ref: club_ref(to),
@@ -1014,7 +1108,7 @@ impl MasterLeague {
             "{label}: loan {} → {} until {}, moves {arrival}",
             self.teams[from].name, self.teams[to].name, req.loan_end
         );
-        self.atomic(move |g| {
+        self.atomic(Redo::Loan(req.clone()), move |g| {
             for (offset, bytes) in tables.agree_loan(&g.data, &table, &deal)? {
                 g.patch(offset, &bytes);
             }
@@ -1048,7 +1142,8 @@ impl MasterLeague {
             return Err(Error::new("Nothing was changed."));
         }
         let label = name.map_or_else(|| format!("ID {}", player.player_id), str::to_string);
-        self.atomic(move |g| {
+        let redo = Redo::Renew { player, salary_eur, end, name: name.map(str::to_string) };
+        self.atomic(redo, move |g| {
             let (offset, bytes, _) = table.renewal(&g.data, &player, club, units, end, today)?;
             g.patch(offset, &bytes);
             // The player's record mirrors the contract's salary and end date.
@@ -1090,7 +1185,8 @@ impl MasterLeague {
         }
         self.refuse_agreed_deal(&table, &player)?;
         let label = name.map_or_else(|| format!("ID {}", player.player_id), str::to_string);
-        self.atomic(move |g| {
+        let redo = Redo::Release { player, compensation_eur, use_transfer_budget, name: name.map(str::to_string) };
+        self.atomic(redo, move |g| {
             let (offset, bytes, contract) = table.removal(&g.data, &player, club)?;
             g.patch(offset, &bytes);
             let mut parts = vec![
@@ -1169,7 +1265,7 @@ impl MasterLeague {
         }
         let patches = league.new_score(&self.data, index, home, away)?;
         let label = self.league_label(club);
-        self.atomic(move |g| {
+        self.atomic(Redo::LeagueWin { index, our_goals, their_goals }, move |g| {
             for (offset, bytes) in &patches {
                 g.patch(*offset, bytes);
             }
